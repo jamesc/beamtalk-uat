@@ -1,0 +1,18 @@
+# Copyright 2026 James Casey
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "beamtalk-uat"
+version = "0.1.0"
+edition = "2021"
+description = "Acceptance-gate harness: installs a released Beamtalk toolchain bundle and runs real-project scenarios against it (BT-2253)."
+license = "Apache-2.0"
+publish = false
+
+# Deliberately dependency-free: the harness orchestrates the *released* `beamtalk`
+# binary plus standard tools (`gh`, `tar`) via std::process. No HTTP/JSON crates,
+# so the harness builds offline and never drifts from the toolchain under test.
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

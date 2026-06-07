@@ -1,0 +1,10 @@
+// Copyright 2026 smoke authors
+// SPDX-License-Identifier: Apache-2.0
+
+TestCase subclass: SmokeTest
+
+  testGreet =>
+    self assert: (Smoke greet) equals: "Hello from smoke!"
+
+  testRun =>
+    self assert: (Smoke run) equals: 42

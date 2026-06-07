@@ -1,0 +1,7 @@
+/target
+# Cached toolchain installs (downloaded release bundles)
+/.beamtalk-uat
+# Beamtalk build artifacts inside fixture projects
+**/_build/
+**/*.beam
+**/*.core
