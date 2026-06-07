@@ -131,7 +131,13 @@ pub fn install(spec: &VersionSpec) -> Result<Toolchain, String> {
     let prefix = repo_root().join(".beamtalk-uat").join(spec.cache_key());
     let bin = prefix.join("bin").join(bin_name());
 
-    if !bin.exists() {
+    // Nightly/latest are rolling targets — always re-download so we don't test
+    // a stale cached install. Exact versions are immutable and safe to reuse.
+    let should_download = match spec {
+        VersionSpec::Exact(_) => !bin.exists(),
+        _ => true,
+    };
+    if should_download {
         download_and_extract(spec, &prefix)?;
     }
     if !bin.exists() {
@@ -336,10 +342,10 @@ fn single_subdir(dir: &Path) -> Result<PathBuf, String> {
 }
 
 /// Copy a project from `projects/<name>` (a real `beamtalk new` package) into a
-/// fresh temp dir and return its path, so builds don't pollute the committed
-/// fixture and runs stay isolated. This is the seed of the general scenario
+/// fresh temp dir. The returned `StagedProject` auto-cleans on drop so builds
+/// don't accumulate in `$TMPDIR`. This is the seed of the general scenario
 /// driver (BT-2450).
-pub fn stage_project(name: &str) -> PathBuf {
+pub fn stage_project(name: &str) -> StagedProject {
     let src = repo_root().join("projects").join(name);
     assert!(src.is_dir(), "project not found: {}", src.display());
 
@@ -350,7 +356,28 @@ pub fn stage_project(name: &str) -> PathBuf {
     ));
     let _ = std::fs::remove_dir_all(&dest);
     copy_dir(&src, &dest).unwrap_or_else(|e| panic!("staging project {name}: {e}"));
-    dest
+    StagedProject(dest)
+}
+
+/// A staged project directory that cleans itself up on drop.
+pub struct StagedProject(PathBuf);
+
+impl StagedProject {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for StagedProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl AsRef<Path> for StagedProject {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
 }
 
 fn next_id() -> u64 {
