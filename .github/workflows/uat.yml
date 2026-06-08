@@ -109,7 +109,12 @@ jobs:
           - platform: macos-arm64
             os: macos-14
           - platform: windows-x86_64
-            os: windows-latest
+            # Pinned, not `windows-latest`: the latest image migrated to
+            # ImageOS `win25-vs2026`, which erlef/setup-beam matches exactly
+            # against `win25` and so fails OS detection ("Tried to map a target
+            # OS from env. variable 'ImageOS'"). windows-2022 (ImageOS `win22`)
+            # is recognised. Matches the pinned macos-13/macos-14 legs.
+            os: windows-2022
     env:
       BEAMTALK_UAT_VERSION: ${{ needs.resolve-version.outputs.version }}
     steps:
