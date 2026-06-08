@@ -1,0 +1,15 @@
+# Copyright 2026 James Casey
+# SPDX-License-Identifier: Apache-2.0
+
+# UAT scenario for BT-2452: an actor-target foreign extension defined in a
+# separate file from the Actor subclass it extends. Building the whole project
+# (not a single file) is what lets the compiler resolve the extension target as
+# an `Actor` subclass and emit the 3-arity state-threading fun
+# (`generate_actor_extension_fun`).
+
+[package]
+name = "actor_extension"
+version = "0.1.0"
+description = "BT-2452 — actor-target foreign extension with state threading"
+
+[dependencies]
