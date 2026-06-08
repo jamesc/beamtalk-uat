@@ -185,9 +185,27 @@ fn parse_flat_toml(text: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(map)
 }
 
+/// Strip a trailing inline comment (`# ...`) from a bare (unquoted) value.
+///
+/// TOML allows `key = value  # comment` but our flat parser doesn't distinguish
+/// that from the value itself. We only strip for bare values — quoted strings
+/// are handled by `unquote_toml_value` which already stops at the closing `"`.
+fn strip_inline_comment(s: &str) -> &str {
+    // If the value is quoted, the comment is outside the quotes — don't strip.
+    if s.starts_with('"') {
+        return s;
+    }
+    // Find the first `#` and trim trailing whitespace before it.
+    match s.find('#') {
+        Some(idx) => s[..idx].trim_end(),
+        None => s,
+    }
+}
+
 /// Strip surrounding double quotes from a TOML string value; pass bare values
 /// through unchanged.
 fn unquote_toml_value(s: &str) -> String {
+    let s = strip_inline_comment(s);
     let bytes = s.as_bytes();
     if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
         // Handle basic TOML string escapes.
@@ -494,6 +512,19 @@ exit_code = 0
     #[test]
     fn unquote_bare_value() {
         assert_eq!(unquote_toml_value("42"), "42");
+    }
+
+    #[test]
+    fn inline_comments_stripped_from_bare_values() {
+        assert_eq!(unquote_toml_value("0  # optional"), "0");
+        assert_eq!(unquote_toml_value("42 # the answer"), "42");
+    }
+
+    #[test]
+    fn inline_comments_not_stripped_from_quoted_values() {
+        // A `#` inside quotes is part of the value; one outside is stripped
+        // by `strip_inline_comment` before unquoting.
+        assert_eq!(unquote_toml_value(r#""has # inside""#), "has # inside");
     }
 
     #[test]
