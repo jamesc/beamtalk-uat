@@ -1,0 +1,206 @@
+# Copyright 2026 James Casey
+# SPDX-License-Identifier: Apache-2.0
+#
+# UAT acceptance gate (BT-2451)
+# =============================
+# Installs a *released* Beamtalk toolchain bundle — the exact artifact a user
+# gets — and runs the full UAT scenario suite against it. The released bundle
+# is the thing under test; nothing here builds Beamtalk from source.
+#
+# Triggers and the version each one tests:
+#   * repository_dispatch (event-type: beamtalk-release) — fired by
+#     jamesc/beamtalk's release.yml (BT-2449) after every platform's release
+#     archive is published. Tests the exact published version, read from
+#     `client_payload.version`.
+#   * workflow_dispatch — manual run; tests the `version` input
+#     (latest / nightly / vX.Y.Z), defaulting to `latest`.
+#   * schedule — nightly cron; tests the rolling `nightly` pre-release so
+#     regressions on the development tip are caught before a tagged release.
+#
+# Each matrix leg installs the bundle for its own platform via the harness
+# (src/lib.rs) and runs the `#[ignore]`d integration scenarios. Job status
+# reflects pass/fail; failed scenarios are surfaced in the job summary.
+
+name: UAT
+
+on:
+  repository_dispatch:
+    types: [beamtalk-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Released version to test: latest, nightly, or vX.Y.Z'
+        required: false
+        default: 'latest'
+  schedule:
+    # 8am UTC daily — after the beamtalk nightly build (6am) and its cross-repo
+    # tests (7am) have published the rolling `nightly` release.
+    - cron: '0 8 * * *'
+
+concurrency:
+  # Serialize per-version so a newer release supersedes an in-flight run for the
+  # same version, but runs for different versions don't cancel each other.
+  group: uat-${{ github.event.client_payload.version || inputs.version || github.event_name }}
+  cancel-in-progress: true
+
+# `gh release download` (in the harness) needs `contents: read` to pull release
+# assets from jamesc/beamtalk; GITHUB_TOKEN is wired through below.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve-version:
+    name: Resolve version under test
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Map trigger to version spec
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # repository_dispatch → exact published version (tag minus leading v);
+          # the dispatcher sends `{ "version": "0.4.0", "tag": "v0.4.0" }`.
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          # workflow_dispatch → the manual input (defaults to `latest`).
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            repository_dispatch)
+              version="$DISPATCH_VERSION"
+              if [ -z "$version" ]; then
+                echo "::error::repository_dispatch payload missing 'version'" >&2
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              version="${INPUT_VERSION:-latest}"
+              ;;
+            schedule)
+              # Nightly cron exercises the rolling development tip.
+              version="nightly"
+              ;;
+            *)
+              version="latest"
+              ;;
+          esac
+          echo "Resolved version under test: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  uat:
+    name: UAT (${{ matrix.platform }})
+    needs: resolve-version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # One platform's failure shouldn't hide the others — report each leg.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+          - platform: macos-x86_64
+            os: macos-13
+          - platform: macos-arm64
+            os: macos-14
+          - platform: windows-x86_64
+            os: windows-latest
+    env:
+      BEAMTALK_UAT_VERSION: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - name: Checkout beamtalk-uat
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27.0'
+          rebar3-version: '3.27'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build harness
+        run: cargo build --tests
+
+      # The harness installs the released bundle via `gh release download` from
+      # jamesc/beamtalk, so `gh` must be authenticated. GITHUB_TOKEN works for
+      # public-repo release reads; `gh` is preinstalled on GitHub runners.
+      - name: Run UAT scenario suite
+        id: suite
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          echo "Testing released version: ${BEAMTALK_UAT_VERSION}"
+          # Run the #[ignore]d integration scenarios; tee output so the summary
+          # step can extract which scenarios failed even when cargo exits non-zero.
+          cargo test --tests -- --ignored --nocapture 2>&1 | tee uat-output.log
+
+      - name: Summarize results
+        if: always()
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          {
+            echo "## UAT — ${PLATFORM}"
+            echo ""
+            echo "- **Version under test:** \`${VERSION}\`"
+            echo "- **Trigger:** \`${{ github.event_name }}\`"
+            if [ "$OUTCOME" = "success" ]; then
+              echo "- **Result:** ✅ all scenarios passed"
+            else
+              echo "- **Result:** ❌ failures detected"
+            fi
+            echo ""
+
+            if [ -f uat-output.log ]; then
+              # The suite prints one `PASS`/`FAIL` line per scenario and, on
+              # failure, a `N of M scenarios failed: a, b` summary. Surface both.
+              if grep -qE '^[0-9]+ of [0-9]+ scenarios failed' uat-output.log; then
+                echo "### Failed scenarios"
+                echo ""
+                echo '```'
+                grep -E '^[0-9]+ of [0-9]+ scenarios failed' uat-output.log || true
+                echo '```'
+                echo ""
+              fi
+              # Per-scenario outcome lines: the driver prints `  PASS  <name>` /
+              # `  FAIL  <name>` (two leading spaces). Anchor on that exact shape
+              # so unrelated lines mentioning "pass"/"fail" don't leak in.
+              if grep -qE '^[[:space:]]+(PASS|FAIL)[[:space:]]' uat-output.log; then
+                echo "<details><summary>Per-scenario results</summary>"
+                echo ""
+                echo '```'
+                grep -E '^[[:space:]]+(PASS|FAIL)[[:space:]]' uat-output.log || true
+                echo '```'
+                echo ""
+                echo "</details>"
+              fi
+              # Rust test harness failure list (e.g. panicking #[test]s).
+              if grep -qE '^failures:' uat-output.log; then
+                echo "<details><summary>Failed tests</summary>"
+                echo ""
+                echo '```'
+                sed -n '/^failures:/,/^test result:/p' uat-output.log || true
+                echo '```'
+                echo ""
+                echo "</details>"
+              fi
+            else
+              echo "_No suite output captured (the harness failed before running scenarios)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
