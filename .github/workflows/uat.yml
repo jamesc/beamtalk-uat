@@ -204,3 +204,82 @@ jobs:
               echo "_No suite output captured (the harness failed before running scenarios)._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─── Report result back onto the beamtalk release (BT-2453) ─────────────
+  # Non-blocking *reporting* mode: post the UAT outcome as a GitHub commit
+  # status (context `uat-gate`) on the commit the released tag points at, so
+  # the result is visible from the originating beamtalk release/tag and a
+  # failure is one click from the failing UAT run (via `target_url`).
+  #
+  # Why a commit status (not a release comment):
+  #   * Idempotent — re-running the gate updates the same `uat-gate` context
+  #     in place rather than stacking duplicate comments.
+  #   * It is the conventional GitHub gate primitive; flipping to a *blocking*
+  #     promotion gate later (see README "Flipping to a blocking promotion
+  #     gate") reuses this signal as a required check / promote-on-pass condition.
+  #
+  # Only fires on the real-release path (repository_dispatch). Manual
+  # workflow_dispatch and nightly schedule runs don't correspond to a tagged
+  # release, so they post nothing — no spurious statuses on beamtalk commits.
+  #
+  # `if: always()` + deriving state from `needs.uat.result` means a failing or
+  # cancelled matrix leg reports `failure`, never a false `success`.
+  report:
+    name: Report result onto beamtalk release
+    needs: uat
+    if: ${{ always() && github.event_name == 'repository_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post commit status on beamtalk tag
+        env:
+          # BEAMTALK_STATUS_TOKEN: a PAT / fine-grained token scoped to
+          # jamesc/beamtalk with *commit statuses: write* (classic: `repo:status`).
+          # Provisioned separately as a repo secret — GITHUB_TOKEN cannot write
+          # to another repository. This is DISTINCT from beamtalk's
+          # UAT_DISPATCH_TOKEN (BT-2449), which writes *into* beamtalk-uat; this
+          # one writes *into* beamtalk.
+          GH_TOKEN: ${{ secrets.BEAMTALK_STATUS_TOKEN }}
+          # The dispatcher (BT-2449) sends `{ "version": …, "tag": "vX.Y.Z" }`.
+          TAG: ${{ github.event.client_payload.tag }}
+          # Derive overall pass/fail from the matrix job result. `success` ⇒ all
+          # legs passed; anything else (failure / cancelled / skipped) ⇒ failure.
+          UAT_RESULT: ${{ needs.uat.result }}
+          # Link the status straight to this workflow run so a failure on the
+          # beamtalk release is one click from the failing UAT logs.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::repository_dispatch payload missing 'tag'; cannot target a beamtalk release" >&2
+            exit 1
+          fi
+
+          if [ "$UAT_RESULT" = "success" ]; then
+            state="success"
+            description="UAT acceptance gate passed"
+          else
+            state="failure"
+            description="UAT acceptance gate failed (result: ${UAT_RESULT})"
+          fi
+          echo "UAT result '${UAT_RESULT}' → commit status '${state}' on jamesc/beamtalk@${TAG}"
+
+          # Resolve the tag → commit SHA. A tag ref's object is either the
+          # commit itself (lightweight tag) or a tag object wrapping the commit
+          # (annotated tag), so capture both the type and the sha, then deref
+          # once more if it's an annotated tag.
+          ref="$(gh api "repos/jamesc/beamtalk/git/refs/tags/${TAG}")"
+          obj_type="$(jq -r '.object.type' <<<"$ref")"
+          sha="$(jq -r '.object.sha' <<<"$ref")"
+          if [ "$obj_type" = "tag" ]; then
+            sha="$(gh api "repos/jamesc/beamtalk/git/tags/${sha}" --jq '.object.sha')"
+          fi
+          echo "Resolved ${TAG} → ${sha}"
+
+          gh api --method POST "repos/jamesc/beamtalk/statuses/${sha}" \
+            -f state="$state" \
+            -f context="uat-gate" \
+            -f description="$description" \
+            -f target_url="$RUN_URL"
+          echo "Posted '${state}' uat-gate status to jamesc/beamtalk@${sha}"
