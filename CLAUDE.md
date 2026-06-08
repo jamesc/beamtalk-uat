@@ -22,8 +22,10 @@ wrong — and say so explicitly.
 | Path | What |
 | --- | --- |
 | `src/lib.rs` | Harness: installs/caches a release bundle, exposes a `Toolchain`, stages projects. |
-| `projects/<name>/` | A real Beamtalk package (created with `beamtalk new`) under test — sources in `src/`, BUnit tests in `test/`. |
-| `tests/*.rs` | The acceptance scenarios (Rust integration tests that drive the toolchain). `#[ignore]` by default. |
+| `src/scenario.rs` | Scenario driver: discovery, `expect.toml` parsing, normalization, build/run/assert. |
+| `projects/<name>/` | A real Beamtalk package under test — `beamtalk.toml`, sources in `src/`, optional BUnit tests in `test/`, and an `expect.toml` declaring the assertion surface. |
+| `tests/scenarios.rs` | General driver test — auto-discovers and runs all `expect.toml` scenarios. |
+| `tests/smoke.rs` | Original smoke test (version check + direct BUnit invocation). |
 | `Justfile` | `just uat [version]` runs the suite; `just uat-local <bin>` against a local binary. |
 
 ## Assertion surfaces
@@ -62,11 +64,27 @@ builds offline and can't drift from the toolchain it tests.
 
 ## Adding a scenario
 
-Until the general driver lands (BT-2450):
+The general scenario driver (BT-2450) auto-discovers every `projects/<name>/`
+directory that contains an `expect.toml`. No per-scenario Rust test code needed.
 
 1. `cd projects && beamtalk new <name>` to scaffold a real package.
-2. Put the behaviour under test in `src/*.bt` and assertions in
-   `test/*.bt` (a `TestCase` using `self assert: … equals: …`).
-3. Add a `#[ignore]` test in `tests/` that `stage_project("<name>")` and runs
-   `beamtalk test`, asserting success. Keep assertions tight enough that a
-   dropped/incorrect behaviour fails the suite.
+2. Put the behaviour under test in `src/*.bt` (multi-file projects are fine).
+3. Add an `expect.toml` in the project root:
+
+   **BUnit scenario** (preferred — deterministic pass/fail):
+   ```toml
+   surface = "bunit"
+   ```
+   Then write assertions in `test/*.bt` (`TestCase` using
+   `self assert: … equals: …`).
+
+   **Run scenario** (assert stdout / exit code from script mode):
+   ```toml
+   surface = "run"
+   entrypoint = "MyClass mySelector"
+   stdout = "expected output"
+   exit_code = 0
+   ```
+   At least one of `stdout` or `exit_code` is required.
+
+4. Done — `just uat` picks it up automatically via `tests/scenarios.rs`.

@@ -32,12 +32,50 @@ just uat-local ~/.beamtalk/bin/beamtalk
 1. The harness (`src/lib.rs`) downloads the platform's release asset from
    `jamesc/beamtalk` via `gh release download`, verifies its checksum, and
    extracts it to a cached install — once per run, reused across scenarios.
-2. Each project under `projects/<name>/` is a real Beamtalk package (`beamtalk
-   new`), with behaviour in `src/` and BUnit assertions in `test/`. A test
-   stages it to a temp dir and runs `beamtalk test`, asserting it passes.
+2. The scenario driver (`src/scenario.rs`, `tests/scenarios.rs`) auto-discovers
+   every `projects/<name>/` directory with an `expect.toml`, stages it to a temp
+   dir, and exercises it through the installed toolchain.
 
 See `CLAUDE.md` for the assertion surfaces (BUnit vs. the interactive REPL for
 value-returning scenarios) and how to add a scenario.
+
+## Scenario layout
+
+Each scenario is a self-contained Beamtalk project under `projects/<name>/`:
+
+```
+projects/
+  smoke/
+    beamtalk.toml      # standard Beamtalk package manifest
+    expect.toml        # declares the assertion surface + expected outcome
+    src/
+      Smoke.bt         # source under test (multi-file projects are supported)
+    test/
+      SmokeTest.bt     # BUnit assertions (for bunit surface)
+```
+
+### `expect.toml` format
+
+**BUnit surface** — runs `beamtalk test` and asserts all tests pass:
+
+```toml
+surface = "bunit"
+```
+
+**Run surface** — runs `beamtalk run <Class> <selector>` and asserts stdout /
+exit code:
+
+```toml
+surface = "run"
+entrypoint = "MyClass mySelector"
+stdout = "expected output"    # compared after normalization
+exit_code = 0                 # optional, defaults to not checked
+```
+
+At least one of `stdout` or `exit_code` is required for `run` scenarios.
+
+Output normalization trims whitespace, collapses internal runs to single spaces,
+and replaces Erlang PIDs (`<0.123.0>`) with `<pid>` so assertions aren't fragile.
 
 ## Requirements
 

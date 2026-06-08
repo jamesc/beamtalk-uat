@@ -8,7 +8,15 @@
 //! real `beamtalk.toml` projects. The released bundle is the thing under test;
 //! we never build from source here.
 //!
-//! Toolchain selection (env vars):
+//! ## Scenario driver (BT-2450)
+//!
+//! Each directory under `projects/<name>/` is a self-contained Beamtalk package
+//! with an `expect.toml` declaring the assertion surface and expected outcome.
+//! The driver discovers all scenarios, stages each to a temp dir, builds it
+//! with the installed `beamtalk`, runs the declared entrypoint, and asserts the
+//! result. See [`Scenario`] and [`scenario`] for the expectation format.
+//!
+//! ## Toolchain selection (env vars)
 //!
 //! * `BEAMTALK_UAT_BIN` — path to an already-installed `beamtalk` binary; skips
 //!   download entirely (local-dev escape hatch).
@@ -18,6 +26,8 @@
 //! Releases are pulled from `jamesc/beamtalk` via `gh release download`, so the
 //! exact published asset for the runner's platform is installed and reused
 //! across scenarios. See `CLAUDE.md` for the gate philosophy.
+
+pub mod scenario;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -122,7 +132,10 @@ pub fn install(spec: &VersionSpec) -> Result<Toolchain, String> {
     if let Ok(bin) = std::env::var("BEAMTALK_UAT_BIN") {
         let bin = PathBuf::from(bin);
         if !bin.exists() {
-            return Err(format!("BEAMTALK_UAT_BIN does not exist: {}", bin.display()));
+            return Err(format!(
+                "BEAMTALK_UAT_BIN does not exist: {}",
+                bin.display()
+            ));
         }
         let version = query_version(&bin)?;
         return Ok(Toolchain { bin, version });
@@ -191,9 +204,11 @@ fn download_and_extract(spec: &VersionSpec, prefix: &Path) -> Result<(), String>
     let (plat, ext) = platform()?;
     let glob = format!("beamtalk-*-{plat}.{ext}");
 
-    let tmp = repo_root()
-        .join(".beamtalk-uat")
-        .join(format!("dl-{}-{}", spec.cache_key(), std::process::id()));
+    let tmp = repo_root().join(".beamtalk-uat").join(format!(
+        "dl-{}-{}",
+        spec.cache_key(),
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| format!("mkdir {}: {e}", tmp.display()))?;
 
@@ -263,7 +278,10 @@ fn find_archive(dir: &Path, ext: &str) -> Result<PathBuf, String> {
 fn verify_checksum(archive: &Path) {
     let sha_file = PathBuf::from(format!("{}.sha256", archive.display()));
     let Ok(contents) = std::fs::read_to_string(&sha_file) else {
-        eprintln!("warning: no checksum file for {}, skipping", archive.display());
+        eprintln!(
+            "warning: no checksum file for {}, skipping",
+            archive.display()
+        );
         return;
     };
     let Some(expected) = contents.split_whitespace().next() else {
@@ -286,7 +304,11 @@ fn sha256_hex(path: &Path) -> Option<String> {
         ("sha256sum", vec![path.to_string_lossy().to_string()]),
         (
             "shasum",
-            vec!["-a".into(), "256".into(), path.to_string_lossy().to_string()],
+            vec![
+                "-a".into(),
+                "256".into(),
+                path.to_string_lossy().to_string(),
+            ],
         ),
     ] {
         if let Ok(out) = Command::new(cmd).args(&args).output() {
@@ -319,7 +341,10 @@ fn extract(archive: &Path, dest: &Path, ext: &str) -> Result<(), String> {
     }
     .map_err(|e| format!("failed to extract {}: {e}", archive.display()))?;
     if !status.success() {
-        return Err(format!("extraction of {} failed ({status})", archive.display()));
+        return Err(format!(
+            "extraction of {} failed ({status})",
+            archive.display()
+        ));
     }
     Ok(())
 }
@@ -415,14 +440,23 @@ mod tests {
         assert_eq!(VersionSpec::parse(""), VersionSpec::Latest);
         assert_eq!(VersionSpec::parse("latest"), VersionSpec::Latest);
         assert_eq!(VersionSpec::parse("nightly"), VersionSpec::Nightly);
-        assert_eq!(VersionSpec::parse("v0.4.0"), VersionSpec::Exact("0.4.0".into()));
-        assert_eq!(VersionSpec::parse("0.4.0"), VersionSpec::Exact("0.4.0".into()));
+        assert_eq!(
+            VersionSpec::parse("v0.4.0"),
+            VersionSpec::Exact("0.4.0".into())
+        );
+        assert_eq!(
+            VersionSpec::parse("0.4.0"),
+            VersionSpec::Exact("0.4.0".into())
+        );
     }
 
     #[test]
     fn version_spec_tags() {
         assert_eq!(VersionSpec::Latest.tag(), None);
         assert_eq!(VersionSpec::Nightly.tag(), Some("nightly".into()));
-        assert_eq!(VersionSpec::Exact("0.4.0".into()).tag(), Some("v0.4.0".into()));
+        assert_eq!(
+            VersionSpec::Exact("0.4.0".into()).tag(),
+            Some("v0.4.0".into())
+        );
     }
 }

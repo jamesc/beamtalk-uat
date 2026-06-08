@@ -1,0 +1,3 @@
+# Smoke scenario: exercises the basic BUnit assertion surface.
+# `beamtalk test` builds the package and runs SmokeTest, asserting pass.
+surface = "bunit"
