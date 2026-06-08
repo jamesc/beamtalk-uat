@@ -1,0 +1,11 @@
+// Copyright 2026 smoke authors
+// SPDX-License-Identifier: Apache-2.0
+
+/// Smoke — minimal class exercising a released toolchain end-to-end.
+Object subclass: Smoke
+
+  /// Return a greeting string.
+  class greet => "Hello from smoke!"
+
+  /// Return a computed value (proves arithmetic executes at runtime).
+  class run => 21 + 21
