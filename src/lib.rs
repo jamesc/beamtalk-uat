@@ -315,7 +315,11 @@ fn sha256_hex(path: &Path) -> Option<String> {
             if out.status.success() {
                 let line = String::from_utf8_lossy(&out.stdout);
                 if let Some(hash) = line.split_whitespace().next() {
-                    return Some(hash.to_string());
+                    // GNU coreutils prefixes the output line with `\` when the
+                    // filename needs escaping — e.g. Windows paths containing
+                    // backslashes (`\D:\a\...`). Strip it so we compare the
+                    // bare hex digest, not `\<hash>`.
+                    return Some(hash.trim_start_matches('\\').to_string());
                 }
             }
         }
