@@ -1,0 +1,22 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// SomeActor — a plain `Actor` subclass with a single mutable state field.
+///
+/// The foreign extension that exercises the 3-arity state-threading codegen
+/// path (`generate_actor_extension_fun`) lives in a *different* file
+/// (`SomeActorExtension.bt`). Splitting the target class and its extension
+/// across files is deliberate: the compiler can only resolve the extension's
+/// target as an `Actor` subclass under project-scope compilation, which is the
+/// only situation that selects the 3-arity (actor) fun shape over the 2-arity
+/// (value-type) one.
+Actor subclass: SomeActor
+  state: tally = 0
+
+  /// Read the current tally. Used by tests to observe state mutated by the
+  /// foreign extension — proving the extension's `NewState` threaded back.
+  tally => self.tally
+
+  /// Mutate state through a normal (non-extension) method, as a control: this
+  /// path is the in-class 3-arity actor method, so it always threads state.
+  bump => self.tally := self.tally + 1

@@ -1,0 +1,8 @@
+# BT-2452 — actor-target foreign extension with state threading.
+#
+# BUnit surface: the driver runs `beamtalk test`, which builds the whole project
+# (so the compiler resolves `SomeActor >> ...` as an Actor subclass and emits the
+# 3-arity state-threading fun) and runs SomeActorExtensionTest. The tests assert
+# the extension dispatches, returns the mutated value, and that the mutation
+# persists in actor state — which only holds on the 3-arity path.
+surface = "bunit"

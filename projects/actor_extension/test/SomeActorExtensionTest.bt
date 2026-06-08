@@ -1,0 +1,52 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+// BT-2452: An actor-target foreign extension (`SomeActor >> ...`, defined in a
+// file separate from the `SomeActor` class) must dispatch at runtime AND thread
+// actor state. This exercises the 3-arity `generate_actor_extension_fun` codegen
+// path end-to-end through the installed toolchain.
+//
+// `perform:` is used to invoke the extensions (mirroring the in-repo
+// foreign_extension_codegen_test): it routes through the same runtime dispatch
+// path that selects the registered extension fun by arity.
+
+TestCase subclass: SomeActorExtensionTest
+
+  // The keyword extension dispatches and RETURNS the mutated value. A dropped
+  // extension would raise does-not-understand here.
+  testExtensionDispatchesAndReturnsMutatedValue =>
+    a := SomeActor spawn
+    result := a perform: #bumpBy: withArguments: #(5)
+    self assert: result equals: 5
+
+  // The mutation PERSISTS in actor state — i.e. the extension's `NewState`
+  // threaded back to the gen_server. This is the assertion that fails if the
+  // extension fell back to the 2-arity value fun (which has no `State` to thread,
+  // so the field write would be lost and the read would still see 0).
+  testExtensionStateThreadsBack =>
+    a := SomeActor spawn
+    a perform: #bumpBy: withArguments: #(7)
+    self assert: a tally equals: 7
+
+  // State accumulates across successive extension sends — proving the threaded
+  // `NewState` from each call is the input to the next, not a fresh zero state.
+  testExtensionStateAccumulates =>
+    a := SomeActor spawn
+    a perform: #bumpBy: withArguments: #(3)
+    a perform: #bumpBy: withArguments: #(4)
+    self assert: a tally equals: 7
+
+  // A unary state-reading extension returns a value derived from current state,
+  // confirming reads (not just writes) work through the actor extension fun.
+  testUnaryExtensionReadsState =>
+    a := SomeActor spawn
+    a perform: #bumpBy: withArguments: #(2)
+    self assert: (a perform: #tallyPlusTen) equals: 12
+
+  // Control: the in-class actor method mutates and threads state the same way,
+  // so the extension path is being compared against a known-good baseline.
+  testInClassMethodThreadsState =>
+    a := SomeActor spawn
+    a bump
+    a bump
+    self assert: a tally equals: 2

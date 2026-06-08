@@ -1,0 +1,34 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+// Foreign cross-class extensions on `SomeActor`, declared in a *separate* file
+// from the class itself (the class lives in `SomeActor.bt`).
+//
+// Because `SomeActor` is foreign to this file, codegen registers each method
+// at load via `beamtalk_extensions:register/5`. The target resolves (under
+// project-scope compilation) to an `Actor` subclass, so codegen must emit the
+// **3-arity** `fun(Args, Self, State) -> {Result, NewState}` shape
+// (`generate_actor_extension_fun`) rather than the 2-arity value-type fun.
+//
+// The discriminating behaviour: `bumpBy:` mutates `self.tally` and returns the
+// new value. If the extension were dropped, the send would raise
+// does-not-understand. If it fell back to the 2-arity *value* fun, the fun
+// would receive no `State` to mutate or thread — the mutation would be lost and
+// a subsequent `tally` read would still see the old value. The tests in
+// `test/SomeActorExtensionTest.bt` assert the mutation both returns *and*
+// persists, which only holds on the 3-arity state-threading path.
+
+/// Host class so this file has a concrete top-level class of its own (the
+/// extensions below attach to the foreign `SomeActor`).
+Object subclass: SomeActorExtensionHost
+
+  class label -> String => "some-actor-extension-host"
+
+// Add `delta` to the actor's tally and return the updated tally. Mutating
+// `self.tally` requires the 3-arity actor calling convention so `NewState`
+// threads back to the gen_server.
+SomeActor >> bumpBy: delta => self.tally := self.tally + delta
+
+// Unary extension that reads state and returns a derived value (no mutation),
+// proving plain state reads work through the actor extension fun too.
+SomeActor >> tallyPlusTen => self.tally + 10
