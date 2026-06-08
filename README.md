@@ -83,6 +83,17 @@ and replaces Erlang PIDs (`<0.123.0>`) with `<pid>` so assertions aren't fragile
 
 ## CI
 
-In CI the suite is triggered against a freshly published release and reports
-pass/fail (the cross-repo dispatch + reporting wiring lands in BT-2449 / BT-2451
-/ BT-2453). See `CLAUDE.md` for the gate philosophy and how to add scenarios.
+The `.github/workflows/uat.yml` gate installs a released bundle and runs the
+full scenario suite across the release platforms (Linux, macOS x86_64 / arm64,
+Windows). It runs on:
+
+- **`repository_dispatch`** (event-type `beamtalk-release`) — fired by
+  jamesc/beamtalk's `release.yml` (BT-2449) after a release is published; tests
+  that exact version (read from `client_payload.version`).
+- **`workflow_dispatch`** — manual run with a `version` input
+  (`latest` / `nightly` / `vX.Y.Z`).
+- **`schedule`** — nightly cron against the rolling `nightly` release.
+
+Job status reflects pass/fail and failed scenarios are surfaced in the job
+summary. Reporting the result back onto the beamtalk release is a follow-up
+(BT-2453). See `CLAUDE.md` for the gate philosophy and how to add scenarios.
