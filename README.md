@@ -97,6 +97,27 @@ commands that mutate the tree (`fmt`, `new`) are isolated. Most `cli_*`
 scenarios are Rust-only and run anywhere; `cli_build` needs Erlang/OTP (the CI
 legs), like the `run`/`bunit` surfaces.
 
+**LSP surface** — drives the bundled `beamtalk-lsp` server over stdio JSON-RPC
+(a hand-rolled, dependency-free client in `src/lsp.rs`) and asserts a
+**substring** of one request's response:
+
+```toml
+surface = "lsp"
+method = "textDocument/hover"   # the LSP request to send
+source = "src/LspHover.bt"      # project-relative file to open
+line = 4                        # 0-based cursor (position requests only)
+character = 18                  # 0-based cursor
+response_contains = "Extends:"  # substring asserted in the response
+```
+
+The server runs standalone in its in-process **AST mode** (no workspace, no
+BEAM), so `lsp_*` scenarios cover editor capabilities (`documentSymbol`,
+`hover`, `completion`, `definition`, …) and go green on **every** platform leg,
+not just the ones with Erlang. `documentSymbol`/`formatting` need no
+`line`/`character`; position requests do. Assert on value substrings (`"self"`,
+`Extends:`, a filename) that don't depend on the server's JSON key spacing. One
+scenario per capability (`projects/lsp_*`).
+
 ## Requirements
 
 - `gh` (authenticated), Erlang/OTP on PATH, and `cargo` + `just`.

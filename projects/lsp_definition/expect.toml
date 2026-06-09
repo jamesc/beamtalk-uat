@@ -1,0 +1,8 @@
+# LSP scenario: textDocument/definition on the class name resolves a location.
+# Cursor (0-based) sits on the class name; the result URI points back at the file.
+surface = "lsp"
+method = "textDocument/definition"
+source = "src/LspDefinition.bt"
+line = 4
+character = 18
+response_contains = "LspDefinition.bt"

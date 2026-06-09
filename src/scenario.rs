@@ -65,6 +65,11 @@ pub enum Surface {
     /// stdout & stderr substrings. The surface for offline build/tooling
     /// commands (`new`, `fmt`, `lint`, `type-coverage`, `build`, …).
     Cli,
+    /// Drive the bundled `beamtalk-lsp` server over stdio JSON-RPC and assert a
+    /// substring of one request's response. Runs standalone (AST mode, no BEAM),
+    /// so it covers editor capabilities (`documentSymbol`, `hover`, `completion`,
+    /// `definition`, …) on any platform.
+    Lsp,
 }
 
 /// A parsed `expect.toml` for one scenario.
@@ -87,6 +92,17 @@ pub struct Expectation {
     /// Expected process exit code. For `cli` it defaults to `0` (success); for
     /// `run` it is only asserted when present.
     pub exit_code: Option<i32>,
+    /// LSP request method to send (`lsp` surface), e.g.
+    /// `"textDocument/documentSymbol"`.
+    pub lsp_method: Option<String>,
+    /// Project-relative path of the source file to open (`lsp` surface).
+    pub source: Option<String>,
+    /// 0-based cursor line for position-based LSP requests (`lsp` surface).
+    pub line: Option<u32>,
+    /// 0-based cursor character for position-based LSP requests (`lsp` surface).
+    pub character: Option<u32>,
+    /// Substring expected in the LSP response (`lsp` surface).
+    pub response_contains: Option<String>,
 }
 
 /// A discovered scenario ready to be driven.
@@ -153,9 +169,10 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
         Some("bunit") => Surface::Bunit,
         Some("run") => Surface::Run,
         Some("cli") => Surface::Cli,
+        Some("lsp") => Surface::Lsp,
         Some(other) => {
             return Err(format!(
-                "unknown surface `{other}` (expected `bunit`, `run`, or `cli`)"
+                "unknown surface `{other}` (expected `bunit`, `run`, `cli`, or `lsp`)"
             ))
         }
         None => return Err("missing required key `surface`".to_string()),
@@ -173,6 +190,19 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
                 .map_err(|e| format!("invalid exit_code `{v}`: {e}"))
         })
         .transpose()?;
+    let lsp_method = kv.get("method").cloned();
+    let source = kv.get("source").cloned();
+    let parse_u32 = |key: &str| -> Result<Option<u32>, String> {
+        kv.get(key)
+            .map(|v| {
+                v.parse::<u32>()
+                    .map_err(|e| format!("invalid {key} `{v}`: {e}"))
+            })
+            .transpose()
+    };
+    let line = parse_u32("line")?;
+    let character = parse_u32("character")?;
+    let response_contains = kv.get("response_contains").cloned();
 
     // Validate: run scenarios need an entrypoint.
     if surface == Surface::Run && entrypoint.is_none() {
@@ -188,6 +218,27 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
     if surface == Surface::Cli && args.is_none() {
         return Err("`surface = \"cli\"` requires an `args` key".to_string());
     }
+    // Validate: lsp scenarios need a method, a source file, and an assertion.
+    if surface == Surface::Lsp {
+        if lsp_method.is_none() {
+            return Err("`surface = \"lsp\"` requires a `method` key".to_string());
+        }
+        if source.is_none() {
+            return Err("`surface = \"lsp\"` requires a `source` key".to_string());
+        }
+        if response_contains.is_none() {
+            return Err("`surface = \"lsp\"` requires a `response_contains` key".to_string());
+        }
+        // Position-based requests need a cursor.
+        if lsp_needs_position(lsp_method.as_deref().unwrap())
+            && (line.is_none() || character.is_none())
+        {
+            return Err(format!(
+                "lsp method `{}` requires `line` and `character`",
+                lsp_method.as_deref().unwrap()
+            ));
+        }
+    }
 
     Ok(Expectation {
         surface,
@@ -197,7 +248,28 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
         stdout_contains,
         stderr_contains,
         exit_code,
+        lsp_method,
+        source,
+        line,
+        character,
+        response_contains,
     })
+}
+
+/// Whether an LSP method takes a `position` (cursor) in its params. Outline /
+/// whole-document requests (`documentSymbol`, `formatting`) do not.
+fn lsp_needs_position(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/hover"
+            | "textDocument/definition"
+            | "textDocument/completion"
+            | "textDocument/references"
+            | "textDocument/implementation"
+            | "textDocument/signatureHelp"
+            | "textDocument/prepareCallHierarchy"
+            | "textDocument/prepareTypeHierarchy"
+    )
 }
 
 /// Parse a flat TOML file (no tables, arrays, or inline tables) into a
@@ -394,6 +466,82 @@ fn run_inner(tc: &Toolchain, scenario: &Scenario) -> Result<(), String> {
         Surface::Bunit => run_bunit(tc, staged.path(), &scenario.name),
         Surface::Run => run_entrypoint(tc, staged.path(), scenario),
         Surface::Cli => run_cli(tc, staged.path(), scenario),
+        Surface::Lsp => run_lsp(tc, staged.path(), scenario),
+    }
+}
+
+/// Drive an `lsp` scenario: start `beamtalk-lsp`, open the source file, send the
+/// declared request, and assert the response contains the expected substring.
+fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
+    let e = &scenario.expect;
+    let method = e.lsp_method.as_deref().unwrap();
+    let needle = e.response_contains.as_deref().unwrap();
+
+    // The language server ships next to `beamtalk` in the bundle's `bin/`.
+    let lsp_bin = tc.bin.with_file_name(if cfg!(windows) {
+        "beamtalk-lsp.exe"
+    } else {
+        "beamtalk-lsp"
+    });
+    if !lsp_bin.exists() {
+        return Err(format!(
+            "lsp binary not found at {} (bundle layout may have changed)",
+            lsp_bin.display()
+        ));
+    }
+
+    let src_rel = e.source.as_deref().unwrap();
+    let src_path = project.join(src_rel);
+    let text = std::fs::read_to_string(&src_path)
+        .map_err(|err| format!("read source {}: {err}", src_path.display()))?;
+    let abs = src_path.canonicalize().unwrap_or_else(|_| src_path.clone());
+    let uri = path_to_uri(&abs);
+    let root_uri = path_to_uri(project);
+
+    let mut client = crate::lsp::LspClient::start(&lsp_bin)?;
+    client.initialize(&root_uri)?;
+    client.did_open(&uri, &text)?;
+
+    // Build params: every request targets the open document; position-based ones
+    // add a cursor; formatting needs FormattingOptions.
+    let td = format!(r#"{{"uri":"{}"}}"#, crate::lsp::json_escape(&uri));
+    let params = if lsp_needs_position(method) {
+        format!(
+            r#"{{"textDocument":{td},"position":{{"line":{},"character":{}}}}}"#,
+            e.line.unwrap(),
+            e.character.unwrap()
+        )
+    } else if method == "textDocument/formatting" {
+        format!(r#"{{"textDocument":{td},"options":{{"tabSize":2,"insertSpaces":true}}}}"#)
+    } else {
+        format!(r#"{{"textDocument":{td}}}"#)
+    };
+
+    let response = client.request(method, &params)?;
+
+    if response.contains("\"error\"") {
+        return Err(format!(
+            "scenario `{}` (`{method}`): server returned an error:\n{response}",
+            scenario.name
+        ));
+    }
+    if !response.contains(needle) {
+        return Err(format!(
+            "scenario `{}` (`{method}`): response missing expected substring {needle:?}\n--- response ---\n{response}",
+            scenario.name
+        ));
+    }
+    Ok(())
+}
+
+/// Build a `file://` URI from an absolute path (Unix; Windows adds the leading
+/// slash and forward slashes the separators).
+fn path_to_uri(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
     }
 }
 
@@ -715,6 +863,59 @@ exit_code = 0
         let expect = parse_expect_toml(&path).unwrap();
         assert_eq!(expect.exit_code, None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_expect(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("expect.toml");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn parse_lsp_expect() {
+        let path = write_expect(
+            "bt-uat-test-lsp-ok",
+            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nsource = \"src/Foo.bt\"\nline = 4\ncharacter = 18\nresponse_contains = \"Extends:\"\n",
+        );
+        let e = parse_expect_toml(&path).unwrap();
+        assert_eq!(e.surface, Surface::Lsp);
+        assert_eq!(e.lsp_method.as_deref(), Some("textDocument/hover"));
+        assert_eq!(e.source.as_deref(), Some("src/Foo.bt"));
+        assert_eq!(e.line, Some(4));
+        assert_eq!(e.character, Some(18));
+        assert_eq!(e.response_contains.as_deref(), Some("Extends:"));
+    }
+
+    #[test]
+    fn parse_lsp_document_symbol_needs_no_position() {
+        let path = write_expect(
+            "bt-uat-test-lsp-symbols",
+            "surface = \"lsp\"\nmethod = \"textDocument/documentSymbol\"\nsource = \"src/Foo.bt\"\nresponse_contains = \"increment:\"\n",
+        );
+        let e = parse_expect_toml(&path).unwrap();
+        assert_eq!(e.line, None);
+        assert_eq!(e.character, None);
+    }
+
+    #[test]
+    fn parse_expect_toml_rejects_lsp_without_required_keys() {
+        // Missing source.
+        let path = write_expect(
+            "bt-uat-test-lsp-no-source",
+            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nresponse_contains = \"x\"\nline = 0\ncharacter = 0\n",
+        );
+        assert!(parse_expect_toml(&path).unwrap_err().contains("source"));
+
+        // Position method missing the cursor.
+        let path = write_expect(
+            "bt-uat-test-lsp-no-pos",
+            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nsource = \"src/Foo.bt\"\nresponse_contains = \"x\"\n",
+        );
+        let err = parse_expect_toml(&path).unwrap_err();
+        assert!(err.contains("line") && err.contains("character"));
     }
 
     #[test]

@@ -1,0 +1,11 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A fixture class for the LSP lsp_hover scenario.
+Object subclass: LspHover
+
+  /// Return the initial value.
+  class start => 0
+
+  /// Add one to n.
+  increment: n => n + 1

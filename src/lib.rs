@@ -27,6 +27,7 @@
 //! exact published asset for the runner's platform is installed and reused
 //! across scenarios. See `CLAUDE.md` for the gate philosophy.
 
+pub mod lsp;
 pub mod scenario;
 
 use std::path::{Path, PathBuf};
