@@ -99,7 +99,15 @@ if [ "${SKIP_ERLANG:-}" = "1" ]; then
   warn "Skipping Erlang (SKIP_ERLANG=1)"
 elif have erl; then
   OTP_VSN=$(erl -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().' -noshell 2>/dev/null || echo "unknown")
-  ok "Erlang/OTP already installed (OTP ${OTP_VSN})"
+  # A non-27 install would pass here and break later (the released bundle targets
+  # OTP 27). Fail loudly unless the caller opted out with SKIP_ERLANG=1.
+  if [[ "${OTP_VSN}" == 27* ]]; then
+    ok "Erlang/OTP already installed (OTP ${OTP_VSN})"
+  else
+    fail "Found Erlang/OTP ${OTP_VSN}; UAT requires OTP 27"
+    fail "Install OTP 27, or re-run with SKIP_ERLANG=1 to bypass intentionally"
+    exit 1
+  fi
 else
   info "Installing Erlang/OTP 27..."
   require_sudo

@@ -93,8 +93,11 @@ just uat nightly      # rolling nightly
 just uat-local ~/.beamtalk/bin/beamtalk   # an already-installed binary
 ```
 
-Selection env vars: `BEAMTALK_UAT_VERSION` (`latest`/`nightly`/`vX.Y.Z`) and
-`BEAMTALK_UAT_BIN` (skip download, use this binary).
+Selection env vars: `BEAMTALK_UAT_VERSION` (`latest`/`nightly`/`edge`/`vX.Y.Z`)
+and `BEAMTALK_UAT_BIN` (skip download, use this binary). `edge` is a rolling
+Linux-only pre-release that beamtalk republishes on every merge to `main`
+(`edge.yml`), so it tracks the toolchain tip with no nightly-cadence lag — it is
+what `ci.yml`'s per-PR e2e gate installs once it exists.
 
 ## Requirements
 

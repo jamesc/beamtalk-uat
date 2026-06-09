@@ -41,8 +41,12 @@ const RELEASE_REPO: &str = "jamesc/beamtalk";
 pub enum VersionSpec {
     /// The latest non-prerelease GitHub release.
     Latest,
-    /// The rolling `nightly` pre-release.
+    /// The rolling `nightly` pre-release (cross-platform, built daily).
     Nightly,
+    /// The rolling `edge` pre-release — a Linux-only bundle republished on every
+    /// merge to `main`, so it tracks the toolchain tip with no nightly-cadence
+    /// lag. This is what the per-PR CI gate (`ci.yml`) installs.
+    Edge,
     /// An explicit semver, stored without a leading `v` (e.g. `0.4.0`).
     Exact(String),
 }
@@ -53,6 +57,7 @@ impl VersionSpec {
         match s.trim() {
             "" | "latest" => VersionSpec::Latest,
             "nightly" => VersionSpec::Nightly,
+            "edge" => VersionSpec::Edge,
             v => VersionSpec::Exact(v.trim_start_matches('v').to_string()),
         }
     }
@@ -67,6 +72,7 @@ impl VersionSpec {
         match self {
             VersionSpec::Latest => None,
             VersionSpec::Nightly => Some("nightly".to_string()),
+            VersionSpec::Edge => Some("edge".to_string()),
             VersionSpec::Exact(v) => Some(format!("v{v}")),
         }
     }
@@ -76,6 +82,7 @@ impl VersionSpec {
         match self {
             VersionSpec::Latest => "latest".to_string(),
             VersionSpec::Nightly => "nightly".to_string(),
+            VersionSpec::Edge => "edge".to_string(),
             VersionSpec::Exact(v) => format!("v{v}"),
         }
     }
@@ -444,6 +451,7 @@ mod tests {
         assert_eq!(VersionSpec::parse(""), VersionSpec::Latest);
         assert_eq!(VersionSpec::parse("latest"), VersionSpec::Latest);
         assert_eq!(VersionSpec::parse("nightly"), VersionSpec::Nightly);
+        assert_eq!(VersionSpec::parse("edge"), VersionSpec::Edge);
         assert_eq!(
             VersionSpec::parse("v0.4.0"),
             VersionSpec::Exact("0.4.0".into())
@@ -458,6 +466,7 @@ mod tests {
     fn version_spec_tags() {
         assert_eq!(VersionSpec::Latest.tag(), None);
         assert_eq!(VersionSpec::Nightly.tag(), Some("nightly".into()));
+        assert_eq!(VersionSpec::Edge.tag(), Some("edge".into()));
         assert_eq!(
             VersionSpec::Exact("0.4.0".into()).tag(),
             Some("v0.4.0".into())

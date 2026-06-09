@@ -403,7 +403,10 @@ fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
     let raw = scenario.expect.args.as_deref().unwrap();
     let args: Vec<&str> = raw.split_whitespace().collect();
     if args.is_empty() {
-        return Err(format!("cli scenario `{}` has empty `args`", scenario.name));
+        return Err(format!(
+            "cli scenario `{}` has whitespace-only `args` (original: {raw:?})",
+            scenario.name
+        ));
     }
 
     let out = tc
