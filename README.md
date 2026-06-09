@@ -118,8 +118,11 @@ Two workflows, with distinct jobs:
   `pull_request` and push to `main`. A hermetic `check` job (fmt, clippy, the
   lib unit tests, a build, shellcheck on the setup scripts — no network/Erlang)
   and an `e2e` job that installs Erlang/OTP and runs the full `#[ignore]d`
-  scenario suite against the **latest** release on one Linux leg, so harness
-  changes meet a real toolchain before merge.
+  scenario suite against **nightly** on one Linux leg, so harness changes meet a
+  real toolchain before merge. Nightly (not `latest`) because the harness is
+  developed against the toolchain tip — scenarios may exercise features that have
+  landed on `main` but aren't in a tagged release yet. Validating a *specific*
+  released version is the release gate's job (below).
 - **`.github/workflows/uat.yml`** — the release acceptance gate (below).
 
 The `uat.yml` gate installs a released bundle and runs the full scenario suite
