@@ -17,6 +17,38 @@ scenario**. A scenario encodes a user-facing contract; if behaviour drifts from
 it, that is the regression. Only weaken a scenario when the contract itself was
 wrong — and say so explicitly.
 
+## When something fails: file a Linear Bug
+
+This gate exists to **catch toolchain regressions** — so a failure is a finding,
+not a chore to route around. **On any failure, file a Linear issue (type `Bug`)
+against the Beamtalk (`BT`) project.** This applies to:
+
+- a red UAT scenario (`just uat` / `cargo test`), on any platform;
+- a crash, panic, or unexpected behaviour from the released bundle hit *while
+  developing* scenarios (build/run/CLI/REPL/MCP/LSP) — even if no scenario
+  asserts it yet;
+- a contract drift you notice by hand against the installed toolchain.
+
+Do **not** silently work around a toolchain bug or weaken a scenario to make it
+pass. If a scenario must change because the *contract* was wrong, say so in the
+issue and the commit.
+
+**Filing (use the Linear MCP `save_issue` tool — `streamlinear-cli` is not
+installed here):**
+
+- Team `BT`, assignee `me`, priority 3 (raise for data-loss / crash-on-trivial-input).
+- Labels: `Bug` (issue type) + one **Item Area** (`cli`, `repl`, `runtime`,
+  `codegen`, `parser`, `stdlib`, `class-system`, `lsp`) + one **Item Size**
+  (`S`/`M`/`L`/`XL`) + `agent-ready` (or `needs-spec` if under-specified).
+- Body: the failing command / scenario name, the **released version under test**
+  (`BEAMTALK_UAT_VERSION` / `tc.version`), expected vs actual, and a minimal
+  repro. Note it was surfaced by beamtalk-uat.
+- If you add or keep a scenario that stays red until the bug is fixed, link the
+  issue from the scenario's `expect.toml` comment.
+
+Example: BT-2476 (`beamtalk new` scaffolds a project that fails its own
+`fmt-check`) — found via the `cli_*` scenarios, exactly the drift this gate is for.
+
 ## Layout
 
 | Path | What |
