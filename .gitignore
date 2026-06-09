@@ -5,3 +5,5 @@
 **/_build/
 **/*.beam
 **/*.core
+# Erlang crash dumps from local BEAM scenario runs
+erl_crash.dump
