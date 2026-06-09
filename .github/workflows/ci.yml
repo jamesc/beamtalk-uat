@@ -1,0 +1,101 @@
+# Copyright 2026 James Casey
+# SPDX-License-Identifier: Apache-2.0
+#
+# PR CI for the UAT harness itself.
+# =================================
+# Distinct from uat.yml (the release acceptance gate, which only fires on
+# release dispatch / nightly / manual): this validates the *harness code* on
+# every pull request and push to main, so changes to src/, tests/, the scenario
+# fixtures and the setup scripts can't merge unchecked.
+#
+# Two jobs:
+#   * check — hermetic and fast: fmt, clippy, the lib unit tests, a build, and
+#     shellcheck on the cloud-setup scripts. No network, no Erlang.
+#   * e2e   — installs Erlang/OTP and runs the full #[ignore]d scenario suite
+#     against the LATEST released bundle (one Linux leg; the cross-platform
+#     matrix lives in uat.yml). This exercises the drivers end-to-end before
+#     merge — the only place harness changes meet a real toolchain, since the
+#     scenarios need a BEAM runtime the dev box may lack.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (fmt, clippy, unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build (all targets)
+        run: cargo build --all-targets
+
+      - name: Unit tests (hermetic — no toolchain install)
+        run: cargo test --lib
+
+      - name: Shellcheck setup scripts
+        run: shellcheck scripts/setup-cloud.sh .claude/hooks/session-start.sh
+
+  e2e:
+    name: E2E scenarios vs latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27.0'
+          rebar3-version: '3.27'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build harness
+        run: cargo build --tests
+
+      # The harness installs the released bundle via `gh release download` from
+      # jamesc/beamtalk, so `gh` must be authenticated. GITHUB_TOKEN works for
+      # public-repo release reads; `gh` is preinstalled on GitHub runners.
+      - name: Run scenario suite against latest release
+        shell: bash
+        env:
+          BEAMTALK_UAT_VERSION: latest
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo test --tests -- --ignored --nocapture

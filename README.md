@@ -112,9 +112,18 @@ drives, and the gate-consistent way to test it later is a self-contained
 
 ## CI
 
-The `.github/workflows/uat.yml` gate installs a released bundle and runs the
-full scenario suite across the release platforms (Linux, macOS x86_64 / arm64,
-Windows). It runs on:
+Two workflows, with distinct jobs:
+
+- **`.github/workflows/ci.yml`** — PR CI for the *harness itself*, on every
+  `pull_request` and push to `main`. A hermetic `check` job (fmt, clippy, the
+  lib unit tests, a build, shellcheck on the setup scripts — no network/Erlang)
+  and an `e2e` job that installs Erlang/OTP and runs the full `#[ignore]d`
+  scenario suite against the **latest** release on one Linux leg, so harness
+  changes meet a real toolchain before merge.
+- **`.github/workflows/uat.yml`** — the release acceptance gate (below).
+
+The `uat.yml` gate installs a released bundle and runs the full scenario suite
+across the release platforms (Linux, macOS x86_64 / arm64, Windows). It runs on:
 
 - **`repository_dispatch`** (event-type `beamtalk-release`) — fired by
   jamesc/beamtalk's `release.yml` (BT-2449) after a release is published; tests
