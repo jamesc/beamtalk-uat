@@ -1,0 +1,16 @@
+# CLI scenario (BT-2476): a freshly scaffolded library is fmt-clean out of the
+# box. `beamtalk new` must emit templates in canonical formatted form, so the
+# scaffolded CI's `fmt-check` gate passes the moment the project is created.
+#
+# `setup` scaffolds the package in the (empty) staged dir; the asserted command
+# runs `fmt-check` inside it and must exit 0.
+#
+# RED until BT-2476 ships in the bundle under test (released 0.4.0 emits a
+# multi-line single-statement test method the formatter rewrites). Goes green on
+# `edge`/`nightly` once the fix merges, then on the next tagged release.
+# https://linear.app/beamtalk/issue/BT-2476
+surface = "cli"
+setup = "new scaffold_fmt_clean"
+cwd = "scaffold_fmt_clean"
+args = "fmt-check"
+exit_code = 0

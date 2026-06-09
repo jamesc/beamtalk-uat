@@ -31,6 +31,8 @@
 //! exit_code = 1                  # optional; defaults to 0 (success)
 //! stdout_contains = "severity"  # optional substring assertion
 //! stderr_contains = "error"     # optional substring assertion
+//! setup = "new scaffolded_pkg"  # optional: a `beamtalk` cmd run first (exit 0)
+//! cwd = "scaffolded_pkg"        # optional: run `args` in this staged subdir
 //! ```
 //!
 //! A `cli` scenario runs `beamtalk <args>` in the staged project directory (a
@@ -82,6 +84,15 @@ pub struct Expectation {
     /// Arguments appended to `beamtalk` for a `cli` scenario, whitespace-split
     /// (e.g. `"lint --format json"`). Required for `cli`, ignored elsewhere.
     pub args: Option<String>,
+    /// Optional `beamtalk` subcommand run *before* `args` for a `cli` scenario
+    /// (whitespace-split, run in the staged project dir, must exit 0). Lets a
+    /// scenario set up state — e.g. `new <pkg>` to scaffold a project the
+    /// asserted command then runs against. Ignored on other surfaces.
+    pub setup: Option<String>,
+    /// Optional working directory (relative to the staged project dir) the
+    /// asserted `args` run in for a `cli` scenario. Used with `setup` to step
+    /// into a freshly scaffolded sub-package. Defaults to the staged dir.
+    pub cwd: Option<String>,
     /// Expected (normalized) stdout, compared *exactly* after normalization
     /// (`run` surface).
     pub stdout: Option<String>,
@@ -180,6 +191,8 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
 
     let entrypoint = kv.get("entrypoint").cloned();
     let args = kv.get("args").cloned();
+    let setup = kv.get("setup").cloned();
+    let cwd = kv.get("cwd").cloned();
     let stdout = kv.get("stdout").cloned();
     let stdout_contains = kv.get("stdout_contains").cloned();
     let stderr_contains = kv.get("stderr_contains").cloned();
@@ -244,6 +257,8 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
         surface,
         entrypoint,
         args,
+        setup,
+        cwd,
         stdout,
         stdout_contains,
         stderr_contains,
@@ -557,10 +572,42 @@ fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
         ));
     }
 
+    // Optional setup command (e.g. `new <pkg>` to scaffold a project the
+    // asserted command then runs against). Must exit 0.
+    if let Some(raw_setup) = scenario.expect.setup.as_deref() {
+        let setup_args: Vec<&str> = raw_setup.split_whitespace().collect();
+        if setup_args.is_empty() {
+            return Err(format!(
+                "cli scenario `{}` has whitespace-only `setup` (original: {raw_setup:?})",
+                scenario.name
+            ));
+        }
+        let setup_out = tc
+            .command()
+            .args(&setup_args)
+            .current_dir(project)
+            .output()
+            .map_err(|e| format!("spawn setup `beamtalk {raw_setup}`: {e}"))?;
+        if !setup_out.status.success() {
+            return Err(format!(
+                "scenario `{}` setup `beamtalk {raw_setup}` failed:\n{}",
+                scenario.name,
+                combined_output(&setup_out)
+            ));
+        }
+    }
+
+    // The asserted command may run in a subdirectory of the staged project
+    // (e.g. the package `setup` just scaffolded).
+    let work_dir = match scenario.expect.cwd.as_deref() {
+        Some(sub) => project.join(sub),
+        None => project.to_path_buf(),
+    };
+
     let out = tc
         .command()
         .args(&args)
-        .current_dir(project)
+        .current_dir(&work_dir)
         .output()
         .map_err(|e| format!("spawn `beamtalk {raw}`: {e}"))?;
 
@@ -836,6 +883,25 @@ exit_code = 0
         assert_eq!(expect.args.as_deref(), Some("lint --format json"));
         assert_eq!(expect.exit_code, Some(1));
         assert_eq!(expect.stdout_contains.as_deref(), Some("severity"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_cli_expect_with_setup_and_cwd() {
+        let dir = std::env::temp_dir().join("bt-uat-test-cli-setup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("expect.toml");
+        std::fs::write(
+            &path,
+            "surface = \"cli\"\nsetup = \"new pkg\"\ncwd = \"pkg\"\nargs = \"fmt-check\"\nexit_code = 0\n",
+        )
+        .unwrap();
+        let expect = parse_expect_toml(&path).unwrap();
+        assert_eq!(expect.surface, Surface::Cli);
+        assert_eq!(expect.setup.as_deref(), Some("new pkg"));
+        assert_eq!(expect.cwd.as_deref(), Some("pkg"));
+        assert_eq!(expect.args.as_deref(), Some("fmt-check"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

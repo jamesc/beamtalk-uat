@@ -1,0 +1,12 @@
+# CLI scenario (BT-2476): a freshly scaffolded application (`new --app`) is
+# fmt-clean out of the box, mirroring `cli_new_fmt_clean` for the app template
+# (supervisor + Main + MainTest). `fmt-check` must exit 0 on a brand-new project.
+#
+# RED until BT-2476 ships in the bundle under test; green on `edge`/`nightly`
+# once the fix merges, then on the next tagged release.
+# https://linear.app/beamtalk/issue/BT-2476
+surface = "cli"
+setup = "new scaffold_app_fmt_clean --app"
+cwd = "scaffold_app_fmt_clean"
+args = "fmt-check"
+exit_code = 0
