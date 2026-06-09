@@ -1,0 +1,7 @@
+# CLI scenario: `beamtalk new` scaffolds a library package.
+#
+# Runs in the (empty) staged scenario dir, so `new` creates the sub-package
+# there and the temp copy is discarded afterwards.
+surface = "cli"
+args = "new scaffolded_lib"
+stdout_contains = "Created library package"

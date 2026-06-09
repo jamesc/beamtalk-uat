@@ -1,0 +1,7 @@
+# CLI scenario: `beamtalk lint` detects a redundant trailing `^` and exits 1.
+# Human-readable diagnostics go to stderr (the JSON format goes to stdout — see
+# the cli_lint_json scenario), following the usual Unix stdout/stderr split.
+surface = "cli"
+args = "lint"
+exit_code = 1
+stderr_contains = "is redundant"

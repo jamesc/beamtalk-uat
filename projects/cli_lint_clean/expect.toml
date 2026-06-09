@@ -1,0 +1,3 @@
+# CLI scenario: `beamtalk lint` is silent and exits 0 on lint-clean sources.
+surface = "cli"
+args = "lint"

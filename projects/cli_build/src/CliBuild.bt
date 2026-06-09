@@ -1,0 +1,11 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A minimal valid package that `beamtalk build` compiles to BEAM bytecode.
+/// Unlike the other CLI scenarios (offline, Rust-only), `build` needs a BEAM
+/// toolchain on PATH — so this scenario only goes green where Erlang/OTP is
+/// installed (the UAT CI legs), matching the `run`/`bunit` surfaces.
+Object subclass: CliBuild
+
+  /// Return a greeting string.
+  class greet => "hi"

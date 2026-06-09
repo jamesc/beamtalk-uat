@@ -1,0 +1,7 @@
+# CLI scenario: `beamtalk --help` lists the command surface.
+#
+# The cheapest possible CLI contract: the binary runs, exits 0, and prints its
+# top-level help banner. No project files needed — `--help` ignores the cwd.
+surface = "cli"
+args = "--help"
+stdout_contains = "Beamtalk compiler command-line interface"

@@ -1,0 +1,4 @@
+# CLI scenario: `beamtalk type-coverage` prints a coverage report and exits 0.
+surface = "cli"
+args = "type-coverage"
+stdout_contains = "Type Coverage Report"

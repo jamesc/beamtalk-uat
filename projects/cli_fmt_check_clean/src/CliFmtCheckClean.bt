@@ -1,0 +1,9 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// An already-formatted class: `beamtalk fmt-check` should report nothing to
+/// reformat and exit 0.
+Object subclass: CliFmtCheckClean
+
+  /// Return a greeting string.
+  class greet => "hi"

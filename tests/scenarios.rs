@@ -36,11 +36,19 @@ fn all_scenarios_pass() {
 
     println!("\n--- UAT scenarios ({}) ---", scenarios.len());
     for s in &scenarios {
+        // Show the most relevant detail per surface: the entrypoint for `run`,
+        // the args for `cli`, nothing extra for `bunit`.
+        let detail = s
+            .expect
+            .entrypoint
+            .as_deref()
+            .or(s.expect.args.as_deref())
+            .unwrap_or("-");
         println!(
-            "  {:20} surface={:5} entrypoint={}",
+            "  {:24} surface={:5} {}",
             s.name,
             format!("{:?}", s.expect.surface),
-            s.expect.entrypoint.as_deref().unwrap_or("-")
+            detail
         );
     }
     println!();
