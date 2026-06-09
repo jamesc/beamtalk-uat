@@ -147,8 +147,31 @@ else
 fi
 
 # --- just ---
-# The `just uat` entrypoint. Installed into ~/.cargo/bin (already on PATH when
-# cargo is present) so no sudo is needed.
+# The `just uat` entrypoint. Best-effort: a transient just.systems hiccup (it can
+# return 403 behind some egress proxies) must NOT abort the whole setup — Erlang
+# is the critical piece. Try a few install methods and only warn if all fail.
+
+install_just() {
+  local dest="${CARGO_HOME:-$HOME/.cargo}/bin"
+  mkdir -p "${dest}"
+  # 1) Prebuilt binary from just.systems (fast, no sudo).
+  if curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 \
+        https://just.systems/install.sh 2>/dev/null \
+        | bash -s -- --to "${dest}" >/dev/null 2>&1 && have just; then
+    return 0
+  fi
+  # 2) Distro package (Debian/Ubuntu universe ships `just`; needs sudo).
+  if { [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; } \
+        && [ "${_NEED_SUDO_WARNING:-}" != "1" ] \
+        && $SUDO apt-get install -y -qq just >/dev/null 2>&1 && have just; then
+    return 0
+  fi
+  # 3) Build from source via cargo (slow but reliable, no sudo).
+  if have cargo && cargo install just --locked >/dev/null 2>&1 && have just; then
+    return 0
+  fi
+  return 1
+}
 
 if [ "${SKIP_JUST:-}" = "1" ]; then
   warn "Skipping just (SKIP_JUST=1)"
@@ -156,11 +179,14 @@ elif have just; then
   ok "just already installed ($(just --version))"
 else
   info "Installing just..."
-  JUST_DEST="${CARGO_HOME:-$HOME/.cargo}/bin"
-  mkdir -p "${JUST_DEST}"
-  curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
-    | bash -s -- --to "${JUST_DEST}"
-  ok "just installed to ${JUST_DEST}"
+  if install_just; then
+    ok "just installed ($(just --version))"
+  else
+    warn "Could not install just (tried just.systems, apt, cargo) — continuing."
+    warn "Erlang is installed; run the suite directly with:"
+    warn "    cargo test --tests -- --ignored --nocapture"
+    warn "Install just later for the \`just uat\` shortcut: https://just.systems"
+  fi
 fi
 
 # --- Verify ---
@@ -169,10 +195,9 @@ echo ""
 info "Verifying installations..."
 ERRORS=0
 
-# Required for the full UAT suite.
-REQUIRED="rustc cargo erl gh just tar"
+# Required for the suite (sans the `just` shortcut, which is best-effort above).
+REQUIRED="rustc cargo erl gh tar"
 [ "${SKIP_ERLANG:-}" = "1" ] && REQUIRED="${REQUIRED/erl/}"
-[ "${SKIP_JUST:-}" = "1" ] && REQUIRED="${REQUIRED/just/}"
 for cmd in $REQUIRED; do
   if have "$cmd"; then
     ok "$cmd"
@@ -182,8 +207,8 @@ for cmd in $REQUIRED; do
   fi
 done
 
-# Optional — informational only.
-for cmd in tmux unzip; do
+# Optional / best-effort — informational only.
+for cmd in just tmux unzip; do
   if have "$cmd"; then ok "$cmd (optional)"; else warn "$cmd not installed (optional)"; fi
 done
 
