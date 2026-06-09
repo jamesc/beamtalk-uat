@@ -101,6 +101,15 @@ legs), like the `run`/`bunit` surfaces.
 
 - `gh` (authenticated), Erlang/OTP on PATH, and `cargo` + `just`.
 
+In a fresh cloud session (Claude Code on the web), run `scripts/setup-cloud.sh`
+to install the missing pieces — it provisions **Erlang/OTP 27** and **just**
+(Rust/cargo, `gh`, `tar`/`unzip` are assumed present) and skips anything already
+installed. A `SessionStart` hook (`.claude/settings.json`) runs it automatically
+on the first session, guarded by a marker file. The script deliberately installs
+no Elixir/Mix toolchain: the LiveView IDE isn't part of the released bundle UAT
+drives, and the gate-consistent way to test it later is a self-contained
+`mix release` OTP tarball that needs no host Elixir.
+
 ## CI
 
 The `.github/workflows/uat.yml` gate installs a released bundle and runs the
