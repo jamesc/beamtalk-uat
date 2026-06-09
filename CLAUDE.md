@@ -55,7 +55,8 @@ Example: BT-2476 (`beamtalk new` scaffolds a project that fails its own
 | --- | --- |
 | `src/lib.rs` | Harness: installs/caches a release bundle, exposes a `Toolchain`, stages projects. |
 | `src/scenario.rs` | Scenario driver: discovery, `expect.toml` parsing, normalization, build/run/assert. |
-| `src/lsp.rs` | Dependency-free LSP stdio client (framing + handshake) used by the `lsp` surface. |
+| `src/lsp.rs` | Dependency-free LSP stdio client (Content-Length framing + handshake) used by the `lsp` surface. |
+| `src/mcp.rs` | Dependency-free MCP stdio client (newline-delimited framing + handshake) used by the `mcp` surface. |
 | `projects/<name>/` | A real Beamtalk package under test — `beamtalk.toml`, sources in `src/`, optional BUnit tests in `test/`, and an `expect.toml` declaring the assertion surface. |
 | `tests/scenarios.rs` | General driver test — auto-discovers and runs all `expect.toml` scenarios. |
 | `tests/smoke.rs` | Original smoke test (version check + direct BUnit invocation). |
@@ -90,9 +91,15 @@ Example: BT-2476 (`beamtalk new` scaffolds a project that fails its own
   green on **every** platform leg, not just the ones with Erlang. Assert on value
   substrings (`"self"`, `Extends:`, a filename) that don't depend on the server's
   JSON key spacing. One scenario per capability (`projects/lsp_*`).
-* **MCP** — not yet wired. `beamtalk-mcp` ships in the bundle but needs a *live
-  workspace* (`--start` spawns `beamtalk repl`, which needs BEAM) — tracked as
-  follow-up.
+* **MCP (`surface = "mcp"`)** — drives the bundled `beamtalk-mcp` server over
+  stdio JSON-RPC (`src/mcp.rs`; **newline-delimited**, unlike LSP's
+  `Content-Length`), calls one tool, and asserts a **substring** of the result.
+  Launched with `--start`, which spawns a live `beamtalk repl` workspace — so
+  `mcp_*` scenarios need a BEAM runtime (the CI legs), and the harness prepends
+  the bundle `bin/` to `PATH` because `--start` shells out to `beamtalk`. The
+  `code = "…"` key is a shortcut for `evaluate`-style tools (`{"code": …}`);
+  other tools take raw `arguments` JSON. One scenario per tool/behaviour
+  (`projects/mcp_*`).
 
 ## Running
 
@@ -168,5 +175,17 @@ directory that contains an `expect.toml`. No per-scenario Rust test code needed.
    response. `documentSymbol` / `formatting` need no `line`/`character`; the
    others do. Assert on value substrings that don't depend on JSON key spacing.
    Name LSP scenarios `lsp_<capability>`, one per capability.
+
+   **MCP scenario** (call a `beamtalk-mcp` tool against a live workspace):
+   ```toml
+   surface = "mcp"
+   tool = "evaluate"          # the MCP tool to call
+   code = "1 + 1"             # shortcut → {"code": "1 + 1"} arguments
+   # arguments = "{}"         # …or raw JSON arguments for other tools
+   response_contains = "2"    # substring asserted in the tool result
+   ```
+   `--start` boots a `beamtalk repl` workspace from the staged project, so the
+   project must compile and these need BEAM (CI legs). Name MCP scenarios
+   `mcp_<tool-or-behaviour>`, one per tool/behaviour.
 
 4. Done — `just uat` picks it up automatically via `tests/scenarios.rs`.

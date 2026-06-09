@@ -1,0 +1,6 @@
+# MCP scenario: evaluate a method on the project's own class — proves the
+# workspace `--start` boots actually loaded the staged project's sources.
+surface = "mcp"
+tool = "evaluate"
+code = "McpProjectEval greet"
+response_contains = "hi from project"

@@ -72,6 +72,10 @@ pub enum Surface {
     /// so it covers editor capabilities (`documentSymbol`, `hover`, `completion`,
     /// `definition`, …) on any platform.
     Lsp,
+    /// Drive the bundled `beamtalk-mcp` server over stdio JSON-RPC, call one
+    /// tool, and assert a substring of the result. `--start` spawns a live
+    /// `beamtalk repl` workspace, so this needs a BEAM runtime (the CI legs).
+    Mcp,
 }
 
 /// A parsed `expect.toml` for one scenario.
@@ -112,8 +116,16 @@ pub struct Expectation {
     pub line: Option<u32>,
     /// 0-based cursor character for position-based LSP requests (`lsp` surface).
     pub character: Option<u32>,
-    /// Substring expected in the LSP response (`lsp` surface).
+    /// Substring expected in the LSP/MCP response (`lsp` / `mcp` surfaces).
     pub response_contains: Option<String>,
+    /// MCP tool name to call (`mcp` surface), e.g. `"evaluate"`.
+    pub tool: Option<String>,
+    /// Convenience for evaluate-style tools (`mcp` surface): the value becomes
+    /// `{"code": "<code>"}` arguments.
+    pub code: Option<String>,
+    /// Raw JSON object passed as the tool's `arguments` (`mcp` surface); used for
+    /// tools other than the `code` shortcut. Defaults to `{}`.
+    pub arguments: Option<String>,
 }
 
 /// A discovered scenario ready to be driven.
@@ -181,9 +193,10 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
         Some("run") => Surface::Run,
         Some("cli") => Surface::Cli,
         Some("lsp") => Surface::Lsp,
+        Some("mcp") => Surface::Mcp,
         Some(other) => {
             return Err(format!(
-                "unknown surface `{other}` (expected `bunit`, `run`, `cli`, or `lsp`)"
+                "unknown surface `{other}` (expected `bunit`, `run`, `cli`, `lsp`, or `mcp`)"
             ))
         }
         None => return Err("missing required key `surface`".to_string()),
@@ -216,6 +229,9 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
     let line = parse_u32("line")?;
     let character = parse_u32("character")?;
     let response_contains = kv.get("response_contains").cloned();
+    let tool = kv.get("tool").cloned();
+    let code = kv.get("code").cloned();
+    let arguments = kv.get("arguments").cloned();
 
     // Validate: run scenarios need an entrypoint.
     if surface == Surface::Run && entrypoint.is_none() {
@@ -252,6 +268,20 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
             ));
         }
     }
+    // Validate: mcp scenarios need a tool and an assertion.
+    if surface == Surface::Mcp {
+        if tool.is_none() {
+            return Err("`surface = \"mcp\"` requires a `tool` key".to_string());
+        }
+        if response_contains.is_none() {
+            return Err("`surface = \"mcp\"` requires a `response_contains` key".to_string());
+        }
+        if code.is_some() && arguments.is_some() {
+            return Err(
+                "`surface = \"mcp\"`: use either `code` or `arguments`, not both".to_string(),
+            );
+        }
+    }
 
     Ok(Expectation {
         surface,
@@ -268,6 +298,9 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
         line,
         character,
         response_contains,
+        tool,
+        code,
+        arguments,
     })
 }
 
@@ -482,7 +515,86 @@ fn run_inner(tc: &Toolchain, scenario: &Scenario) -> Result<(), String> {
         Surface::Run => run_entrypoint(tc, staged.path(), scenario),
         Surface::Cli => run_cli(tc, staged.path(), scenario),
         Surface::Lsp => run_lsp(tc, staged.path(), scenario),
+        Surface::Mcp => run_mcp(tc, staged.path(), scenario),
     }
+}
+
+/// Drive an `mcp` scenario: start `beamtalk-mcp --start` (which boots a live
+/// workspace), call the declared tool, and assert the response substring.
+fn run_mcp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
+    let e = &scenario.expect;
+    let tool = e.tool.as_deref().unwrap();
+    let needle = e.response_contains.as_deref().unwrap();
+
+    let bin_dir = tc
+        .bin
+        .parent()
+        .ok_or("could not locate bundle bin/ dir")?
+        .to_path_buf();
+    let mcp_bin = bin_dir.join(if cfg!(windows) {
+        "beamtalk-mcp.exe"
+    } else {
+        "beamtalk-mcp"
+    });
+    if !mcp_bin.exists() {
+        return Err(format!(
+            "mcp binary not found at {} (bundle layout may have changed)",
+            mcp_bin.display()
+        ));
+    }
+
+    // Build the tool arguments: `code = "..."` is a shortcut for the evaluate
+    // shape; otherwise use the raw `arguments` JSON, defaulting to `{}`.
+    let arguments = if let Some(code) = e.code.as_deref() {
+        format!(r#"{{"code":"{}"}}"#, crate::lsp::json_escape(code))
+    } else {
+        e.arguments.clone().unwrap_or_else(|| "{}".to_string())
+    };
+
+    let result = (|| -> Result<(), String> {
+        let mut client = crate::mcp::McpClient::start(&mcp_bin, project, &bin_dir)?;
+        client.initialize()?;
+        let response = client.call_tool(tool, &arguments)?;
+
+        // A JSON-RPC error, or a tool result flagged `isError`, is a failure.
+        if response.contains("\"error\"") && !response.contains("\"isError\":false") {
+            return Err(format!(
+                "scenario `{}` (mcp `{tool}`): server returned an error:\n{response}",
+                scenario.name
+            ));
+        }
+        if response.contains("\"isError\":true") || response.contains("\"isError\": true") {
+            return Err(format!(
+                "scenario `{}` (mcp `{tool}`): tool reported isError:\n{response}",
+                scenario.name
+            ));
+        }
+        if !response.contains(needle) {
+            return Err(format!(
+                "scenario `{}` (mcp `{tool}`): response missing expected substring {needle:?}\n--- response ---\n{response}",
+                scenario.name
+            ));
+        }
+        Ok(())
+    })();
+
+    // Best-effort: stop the workspace `--start` spawned so it doesn't linger.
+    // Fire-and-forget — never let cleanup block or fail the scenario.
+    let mut path = std::ffi::OsString::from(bin_dir.as_os_str());
+    if let Some(existing) = std::env::var_os("PATH") {
+        path.push(if cfg!(windows) { ";" } else { ":" });
+        path.push(existing);
+    }
+    let _ = tc
+        .command()
+        .args(["workspace", "stop"])
+        .current_dir(project)
+        .env("PATH", path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    result
 }
 
 /// Drive an `lsp` scenario: start `beamtalk-lsp`, open the source file, send the
@@ -982,6 +1094,38 @@ exit_code = 0
         );
         let err = parse_expect_toml(&path).unwrap_err();
         assert!(err.contains("line") && err.contains("character"));
+    }
+
+    #[test]
+    fn parse_mcp_expect() {
+        let path = write_expect(
+            "bt-uat-test-mcp-ok",
+            "surface = \"mcp\"\ntool = \"evaluate\"\ncode = \"1 + 1\"\nresponse_contains = \"2\"\n",
+        );
+        let e = parse_expect_toml(&path).unwrap();
+        assert_eq!(e.surface, Surface::Mcp);
+        assert_eq!(e.tool.as_deref(), Some("evaluate"));
+        assert_eq!(e.code.as_deref(), Some("1 + 1"));
+        assert_eq!(e.response_contains.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn parse_expect_toml_rejects_mcp_without_tool() {
+        let path = write_expect(
+            "bt-uat-test-mcp-no-tool",
+            "surface = \"mcp\"\nresponse_contains = \"2\"\n",
+        );
+        assert!(parse_expect_toml(&path).unwrap_err().contains("tool"));
+    }
+
+    #[test]
+    fn parse_expect_toml_rejects_mcp_code_and_arguments() {
+        let path = write_expect(
+            "bt-uat-test-mcp-both",
+            "surface = \"mcp\"\ntool = \"evaluate\"\ncode = \"1\"\narguments = \"{}\"\nresponse_contains = \"x\"\n",
+        );
+        let err = parse_expect_toml(&path).unwrap_err();
+        assert!(err.contains("code") && err.contains("arguments"));
     }
 
     #[test]
