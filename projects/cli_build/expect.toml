@@ -1,0 +1,4 @@
+# CLI scenario: `beamtalk build` compiles the package to BEAM bytecode (exit 0).
+# Requires Erlang/OTP (BEAM) on PATH — runs on the UAT CI legs.
+surface = "cli"
+args = "build"

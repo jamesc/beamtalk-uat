@@ -24,7 +24,21 @@
 //! # At least one of `stdout` or `exit_code` must be present.
 //! stdout = "Hello from smoke!"
 //! exit_code = 0
+//!
+//! # -- CLI scenario (drive a `beamtalk` subcommand directly) --
+//! surface = "cli"
+//! args = "lint --format json"   # appended to `beamtalk`, whitespace-split
+//! exit_code = 1                  # optional; defaults to 0 (success)
+//! stdout_contains = "severity"  # optional substring assertion
+//! stderr_contains = "error"     # optional substring assertion
 //! ```
+//!
+//! A `cli` scenario runs `beamtalk <args>` in the staged project directory (a
+//! throwaway temp copy, so commands that mutate the tree — `fmt`, `new` — are
+//! isolated). It is the surface for the build/tooling commands that have no REPL
+//! op: `new`, `fmt`, `fmt-check`, `lint`, `type-coverage`, `build`, `--help`, …
+//! Assertions use **substring** matching (not exact, like `run`) because CLI
+//! output embeds absolute paths and version strings that vary per environment.
 //!
 //! ## Output normalization
 //!
@@ -47,6 +61,10 @@ pub enum Surface {
     Bunit,
     /// Run `beamtalk run <Class> <selector>` and assert stdout / exit code.
     Run,
+    /// Run an arbitrary `beamtalk <args>` subcommand and assert exit code /
+    /// stdout & stderr substrings. The surface for offline build/tooling
+    /// commands (`new`, `fmt`, `lint`, `type-coverage`, `build`, …).
+    Cli,
 }
 
 /// A parsed `expect.toml` for one scenario.
@@ -54,11 +72,20 @@ pub enum Surface {
 pub struct Expectation {
     /// Which surface to exercise.
     pub surface: Surface,
-    /// `Class selector` entrypoint (required for `run`, ignored for `bunit`).
+    /// `Class selector` entrypoint (required for `run`, ignored elsewhere).
     pub entrypoint: Option<String>,
-    /// Expected (normalized) stdout. Compared after normalization.
+    /// Arguments appended to `beamtalk` for a `cli` scenario, whitespace-split
+    /// (e.g. `"lint --format json"`). Required for `cli`, ignored elsewhere.
+    pub args: Option<String>,
+    /// Expected (normalized) stdout, compared *exactly* after normalization
+    /// (`run` surface).
     pub stdout: Option<String>,
-    /// Expected process exit code. Defaults to `0` if omitted.
+    /// Substring expected to appear in stdout (`cli` surface).
+    pub stdout_contains: Option<String>,
+    /// Substring expected to appear in stderr (`cli` surface).
+    pub stderr_contains: Option<String>,
+    /// Expected process exit code. For `cli` it defaults to `0` (success); for
+    /// `run` it is only asserted when present.
     pub exit_code: Option<i32>,
 }
 
@@ -125,16 +152,20 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
     let surface = match kv.get("surface").map(|s| s.as_str()) {
         Some("bunit") => Surface::Bunit,
         Some("run") => Surface::Run,
+        Some("cli") => Surface::Cli,
         Some(other) => {
             return Err(format!(
-                "unknown surface `{other}` (expected `bunit` or `run`)"
+                "unknown surface `{other}` (expected `bunit`, `run`, or `cli`)"
             ))
         }
         None => return Err("missing required key `surface`".to_string()),
     };
 
     let entrypoint = kv.get("entrypoint").cloned();
+    let args = kv.get("args").cloned();
     let stdout = kv.get("stdout").cloned();
+    let stdout_contains = kv.get("stdout_contains").cloned();
+    let stderr_contains = kv.get("stderr_contains").cloned();
     let exit_code = kv
         .get("exit_code")
         .map(|v| {
@@ -153,11 +184,18 @@ fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
             "`surface = \"run\"` requires at least one of `stdout` or `exit_code`".to_string(),
         );
     }
+    // Validate: cli scenarios need a command to run.
+    if surface == Surface::Cli && args.is_none() {
+        return Err("`surface = \"cli\"` requires an `args` key".to_string());
+    }
 
     Ok(Expectation {
         surface,
         entrypoint,
+        args,
         stdout,
+        stdout_contains,
+        stderr_contains,
         exit_code,
     })
 }
@@ -355,6 +393,60 @@ fn run_inner(tc: &Toolchain, scenario: &Scenario) -> Result<(), String> {
     match scenario.expect.surface {
         Surface::Bunit => run_bunit(tc, staged.path(), &scenario.name),
         Surface::Run => run_entrypoint(tc, staged.path(), scenario),
+        Surface::Cli => run_cli(tc, staged.path(), scenario),
+    }
+}
+
+/// Drive a `cli` scenario: run `beamtalk <args>` in the staged project dir and
+/// assert exit code (defaulting to `0`) plus optional stdout/stderr substrings.
+fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
+    let raw = scenario.expect.args.as_deref().unwrap();
+    let args: Vec<&str> = raw.split_whitespace().collect();
+    if args.is_empty() {
+        return Err(format!("cli scenario `{}` has empty `args`", scenario.name));
+    }
+
+    let out = tc
+        .command()
+        .args(&args)
+        .current_dir(project)
+        .output()
+        .map_err(|e| format!("spawn `beamtalk {raw}`: {e}"))?;
+
+    let mut errors = Vec::new();
+
+    // Assert exit code — for cli, an absent `exit_code` means "expect success".
+    let expected_code = scenario.expect.exit_code.unwrap_or(0);
+    let actual_code = out.status.code().unwrap_or(-1);
+    if actual_code != expected_code {
+        errors.push(format!(
+            "exit code: expected {expected_code}, got {actual_code}"
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    if let Some(ref needle) = scenario.expect.stdout_contains {
+        if !stdout.contains(needle.as_str()) {
+            errors.push(format!("stdout missing expected substring: {needle:?}"));
+        }
+    }
+    if let Some(ref needle) = scenario.expect.stderr_contains {
+        if !stderr.contains(needle.as_str()) {
+            errors.push(format!("stderr missing expected substring: {needle:?}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "scenario `{}` (`beamtalk {raw}`):\n{}\n--- full output ---\n{}",
+            scenario.name,
+            errors.join("\n"),
+            combined_output(&out)
+        ))
     }
 }
 
@@ -574,6 +666,51 @@ exit_code = 0
         let result = parse_expect_toml(&path);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("stdout"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_cli_expect() {
+        let dir = std::env::temp_dir().join("bt-uat-test-cli-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("expect.toml");
+        std::fs::write(
+            &path,
+            "surface = \"cli\"\nargs = \"lint --format json\"\nexit_code = 1\nstdout_contains = \"severity\"\n",
+        )
+        .unwrap();
+        let expect = parse_expect_toml(&path).unwrap();
+        assert_eq!(expect.surface, Surface::Cli);
+        assert_eq!(expect.args.as_deref(), Some("lint --format json"));
+        assert_eq!(expect.exit_code, Some(1));
+        assert_eq!(expect.stdout_contains.as_deref(), Some("severity"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_expect_toml_rejects_cli_without_args() {
+        let dir = std::env::temp_dir().join("bt-uat-test-cli-no-args");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("expect.toml");
+        std::fs::write(&path, "surface = \"cli\"\nexit_code = 0\n").unwrap();
+        let result = parse_expect_toml(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("args"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_cli_expect_defaults_exit_code_absent() {
+        // An absent exit_code is allowed for cli (the driver treats it as 0).
+        let dir = std::env::temp_dir().join("bt-uat-test-cli-default");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("expect.toml");
+        std::fs::write(&path, "surface = \"cli\"\nargs = \"--help\"\n").unwrap();
+        let expect = parse_expect_toml(&path).unwrap();
+        assert_eq!(expect.exit_code, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

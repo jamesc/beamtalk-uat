@@ -1,0 +1,3 @@
+# CLI scenario: `beamtalk fmt-check` exits 0 on already-formatted sources.
+surface = "cli"
+args = "fmt-check"

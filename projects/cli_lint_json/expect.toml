@@ -1,0 +1,6 @@
+# CLI scenario: `beamtalk lint --format json` emits a JSON summary record and
+# exits 1 when diagnostics are present.
+surface = "cli"
+args = "lint --format json"
+exit_code = 1
+stdout_contains = "\"type\":\"summary\""

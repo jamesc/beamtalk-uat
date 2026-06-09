@@ -40,6 +40,17 @@ wrong — and say so explicitly.
   `beamtalk repl` in a tmux pane, polling for the `>` backend prompt (it appears
   only after the project compiles + connects — *not* at the banner), sending the
   expression, and polling the pane for the result.
+* **CLI (`surface = "cli"`)** — drives a `beamtalk <args>` subcommand directly
+  and asserts exit code + stdout/stderr **substrings**. This covers the offline
+  build/tooling commands that have no REPL op (`new`, `fmt`, `fmt-check`, `lint`,
+  `type-coverage`, `build`, `--help`). One scenario per command/behaviour
+  (`projects/cli_*`). Note the stdout/stderr split: human-readable diagnostics
+  go to **stderr**, machine formats (`--format json`) to **stdout** — assert the
+  right stream. Most `cli_*` scenarios are Rust-only and run anywhere; the ones
+  that compile (`cli_build`) need Erlang/OTP, so they only go green on the CI
+  legs. MCP and LSP surfaces are not yet wired (they ship as separate
+  `beamtalk-mcp` / `beamtalk-lsp` binaries in the bundle; LSP runs standalone in
+  AST mode, MCP needs a live workspace) — tracked as follow-up.
 
 ## Running
 
@@ -86,5 +97,17 @@ directory that contains an `expect.toml`. No per-scenario Rust test code needed.
    exit_code = 0
    ```
    At least one of `stdout` or `exit_code` is required.
+
+   **CLI scenario** (drive a `beamtalk` subcommand directly):
+   ```toml
+   surface = "cli"
+   args = "lint --format json"   # whitespace-split, appended to `beamtalk`
+   exit_code = 1                 # optional, defaults to 0
+   stdout_contains = "summary"   # optional substring assertion
+   stderr_contains = "redundant" # optional substring assertion
+   ```
+   Runs in the staged (temp-copied) project dir. `args` is required;
+   assertions are substring matches. Name CLI scenarios `cli_<command>` and
+   keep one command/behaviour per scenario.
 
 4. Done — `just uat` picks it up automatically via `tests/scenarios.rs`.

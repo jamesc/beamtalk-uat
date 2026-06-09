@@ -1,0 +1,10 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A lint-dirty class: the trailing `^` on the last expression is redundant
+/// (Beamtalk returns the last expression implicitly). `beamtalk lint` must flag
+/// it and exit non-zero. The source is otherwise fmt-clean.
+Object subclass: CliLintDetects
+
+  /// Return a greeting string (with a redundant explicit return).
+  class greet => ^"hi"

@@ -1,0 +1,7 @@
+# CLI scenario: `beamtalk new --app` scaffolds an application package.
+#
+# The `--app` flag selects the application template over the default library
+# template — a distinct scaffolding path worth its own contract.
+surface = "cli"
+args = "new scaffolded_app --app"
+stdout_contains = "Created application package"

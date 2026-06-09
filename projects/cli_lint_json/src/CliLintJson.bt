@@ -1,0 +1,9 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A lint-dirty class used to exercise `beamtalk lint --format json`: the
+/// trailing `^` produces a machine-readable diagnostic plus a summary record.
+Object subclass: CliLintJson
+
+  /// Return a greeting string (with a redundant explicit return).
+  class greet => ^"hi"

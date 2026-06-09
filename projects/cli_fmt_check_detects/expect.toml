@@ -1,0 +1,6 @@
+# CLI scenario: `beamtalk fmt-check` reports a reformat is needed and exits 1
+# on mis-formatted sources (it never mutates the file — that's `fmt`).
+surface = "cli"
+args = "fmt-check"
+exit_code = 1
+stdout_contains = "would be reformatted"

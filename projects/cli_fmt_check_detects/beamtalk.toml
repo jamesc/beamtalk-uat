@@ -1,0 +1,5 @@
+[package]
+name = "cli_fmt_check_detects"
+version = "0.1.0"
+
+[dependencies]

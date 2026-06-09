@@ -1,0 +1,8 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A deliberately mis-formatted class (irregular spacing): `beamtalk fmt-check`
+/// must report that the file would be reformatted and exit non-zero.
+Object   subclass:   CliFmtCheckDetects
+
+  class greet =>     "hi"

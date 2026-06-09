@@ -1,0 +1,4 @@
+# Build outputs (build runs in a staged temp copy; this guards in-place runs)
+/_build/
+*.beam
+*.core

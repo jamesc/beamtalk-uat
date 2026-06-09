@@ -77,6 +77,26 @@ At least one of `stdout` or `exit_code` is required for `run` scenarios.
 Output normalization trims whitespace, collapses internal runs to single spaces,
 and replaces Erlang PIDs (`<0.123.0>`) with `<pid>` so assertions aren't fragile.
 
+**CLI surface** — runs an arbitrary `beamtalk <args>` subcommand in the staged
+project dir and asserts exit code plus stdout/stderr **substrings**:
+
+```toml
+surface = "cli"
+args = "lint --format json"   # appended to `beamtalk`, whitespace-split
+exit_code = 1                 # optional, defaults to 0 (success)
+stdout_contains = "summary"   # optional substring assertion
+stderr_contains = "redundant" # optional substring assertion
+```
+
+This is the surface for the offline build/tooling commands with no REPL op —
+`new`, `fmt`, `fmt-check`, `lint`, `type-coverage`, `build`, `--help`, … One
+scenario per command/behaviour (`projects/cli_*`). Substring (not exact)
+matching is used because CLI output embeds absolute paths and version strings
+that vary per environment. The staged project is a throwaway temp copy, so
+commands that mutate the tree (`fmt`, `new`) are isolated. Most `cli_*`
+scenarios are Rust-only and run anywhere; `cli_build` needs Erlang/OTP (the CI
+legs), like the `run`/`bunit` surfaces.
+
 ## Requirements
 
 - `gh` (authenticated), Erlang/OTP on PATH, and `cargo` + `just`.

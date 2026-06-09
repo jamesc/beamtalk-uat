@@ -1,0 +1,9 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A lint-clean class: no trailing `^`, no redundancy. `beamtalk lint` should
+/// report nothing and exit 0.
+Object subclass: CliLintClean
+
+  /// Return a greeting string.
+  class greet => "hi"

@@ -1,0 +1,9 @@
+// Copyright 2026 James Casey
+// SPDX-License-Identifier: Apache-2.0
+
+/// A simple class exercising `beamtalk type-coverage` — the type-inference
+/// coverage reporter walks the source and prints a per-class/per-file report.
+Object subclass: CliTypeCoverage
+
+  /// Return a greeting string.
+  class greet => "hi"
