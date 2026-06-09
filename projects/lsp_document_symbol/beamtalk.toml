@@ -1,0 +1,5 @@
+[package]
+name = "lsp_document_symbol"
+version = "0.1.0"
+
+[dependencies]

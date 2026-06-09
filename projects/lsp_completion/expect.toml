@@ -1,0 +1,8 @@
+# LSP scenario: textDocument/completion in a method body offers completions.
+# Cursor (0-based) sits in the body of `increment: n => n + 1`.
+surface = "lsp"
+method = "textDocument/completion"
+source = "src/LspCompletion.bt"
+line = 10
+character = 18
+response_contains = "\"self\""

@@ -55,6 +55,7 @@ Example: BT-2476 (`beamtalk new` scaffolds a project that fails its own
 | --- | --- |
 | `src/lib.rs` | Harness: installs/caches a release bundle, exposes a `Toolchain`, stages projects. |
 | `src/scenario.rs` | Scenario driver: discovery, `expect.toml` parsing, normalization, build/run/assert. |
+| `src/lsp.rs` | Dependency-free LSP stdio client (framing + handshake) used by the `lsp` surface. |
 | `projects/<name>/` | A real Beamtalk package under test — `beamtalk.toml`, sources in `src/`, optional BUnit tests in `test/`, and an `expect.toml` declaring the assertion surface. |
 | `tests/scenarios.rs` | General driver test — auto-discovers and runs all `expect.toml` scenarios. |
 | `tests/smoke.rs` | Original smoke test (version check + direct BUnit invocation). |
@@ -80,9 +81,18 @@ Example: BT-2476 (`beamtalk new` scaffolds a project that fails its own
   go to **stderr**, machine formats (`--format json`) to **stdout** — assert the
   right stream. Most `cli_*` scenarios are Rust-only and run anywhere; the ones
   that compile (`cli_build`) need Erlang/OTP, so they only go green on the CI
-  legs. MCP and LSP surfaces are not yet wired (they ship as separate
-  `beamtalk-mcp` / `beamtalk-lsp` binaries in the bundle; LSP runs standalone in
-  AST mode, MCP needs a live workspace) — tracked as follow-up.
+  legs.
+* **LSP (`surface = "lsp"`)** — drives the bundled `beamtalk-lsp` server over
+  stdio JSON-RPC (`src/lsp.rs`, a hand-rolled dependency-free client) and asserts
+  a **substring** of one request's response. The server runs standalone in
+  **AST mode** (no workspace, no BEAM), so `lsp_*` scenarios cover editor
+  capabilities (`documentSymbol`, `hover`, `completion`, `definition`, …) and go
+  green on **every** platform leg, not just the ones with Erlang. Assert on value
+  substrings (`"self"`, `Extends:`, a filename) that don't depend on the server's
+  JSON key spacing. One scenario per capability (`projects/lsp_*`).
+* **MCP** — not yet wired. `beamtalk-mcp` ships in the bundle but needs a *live
+  workspace* (`--start` spawns `beamtalk repl`, which needs BEAM) — tracked as
+  follow-up.
 
 ## Running
 
@@ -144,5 +154,19 @@ directory that contains an `expect.toml`. No per-scenario Rust test code needed.
    Runs in the staged (temp-copied) project dir. `args` is required;
    assertions are substring matches. Name CLI scenarios `cli_<command>` and
    keep one command/behaviour per scenario.
+
+   **LSP scenario** (drive the `beamtalk-lsp` server over stdio):
+   ```toml
+   surface = "lsp"
+   method = "textDocument/hover"   # the LSP request to send
+   source = "src/LspHover.bt"      # project-relative file to open
+   line = 4                        # 0-based cursor (position requests only)
+   character = 18                  # 0-based cursor
+   response_contains = "Extends:"  # substring asserted in the response
+   ```
+   The harness opens `source`, sends `method`, and substring-checks the
+   response. `documentSymbol` / `formatting` need no `line`/`character`; the
+   others do. Assert on value substrings that don't depend on JSON key spacing.
+   Name LSP scenarios `lsp_<capability>`, one per capability.
 
 4. Done — `just uat` picks it up automatically via `tests/scenarios.rs`.
