@@ -1,0 +1,6 @@
+# MCP scenario: tools/call `evaluate` runs an expression in the live workspace
+# that `beamtalk-mcp --start` boots. Proves the MCP -> workspace -> eval path.
+surface = "mcp"
+tool = "evaluate"
+code = "1 + 1"
+response_contains = "2"

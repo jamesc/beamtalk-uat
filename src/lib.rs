@@ -28,6 +28,7 @@
 //! across scenarios. See `CLAUDE.md` for the gate philosophy.
 
 pub mod lsp;
+pub mod mcp;
 pub mod scenario;
 
 use std::path::{Path, PathBuf};

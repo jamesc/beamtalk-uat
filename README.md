@@ -118,6 +118,26 @@ not just the ones with Erlang. `documentSymbol`/`formatting` need no
 `Extends:`, a filename) that don't depend on the server's JSON key spacing. One
 scenario per capability (`projects/lsp_*`).
 
+**MCP surface** — drives the bundled `beamtalk-mcp` server over stdio JSON-RPC
+(a hand-rolled, dependency-free client in `src/mcp.rs`; **newline-delimited**,
+unlike LSP's `Content-Length` framing), calls one tool, and asserts a
+**substring** of the result:
+
+```toml
+surface = "mcp"
+tool = "evaluate"          # the MCP tool to call
+code = "1 + 1"             # shortcut → {"code": "1 + 1"} arguments
+# arguments = "{}"         # …or raw JSON arguments for other tools
+response_contains = "2"    # substring asserted in the tool result
+```
+
+`beamtalk-mcp` is launched with `--start`, which boots a live `beamtalk repl`
+**workspace** from the staged project — so `mcp_*` scenarios need a BEAM runtime
+(the CI legs), the project must compile, and the harness prepends the bundle
+`bin/` to `PATH` (since `--start` shells out to `beamtalk`). The `code` key is a
+shortcut for `evaluate`-style tools; other tools take raw `arguments` JSON. One
+scenario per tool/behaviour (`projects/mcp_*`).
+
 ## Requirements
 
 - `gh` (authenticated), Erlang/OTP on PATH, and `cargo` + `just`.
