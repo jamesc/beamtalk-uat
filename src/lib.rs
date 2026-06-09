@@ -151,8 +151,8 @@ pub fn install(spec: &VersionSpec) -> Result<Toolchain, String> {
     let prefix = repo_root().join(".beamtalk-uat").join(spec.cache_key());
     let bin = prefix.join("bin").join(bin_name());
 
-    // Nightly/latest are rolling targets — always re-download so we don't test
-    // a stale cached install. Exact versions are immutable and safe to reuse.
+    // Nightly/latest/edge are rolling targets — always re-download so we don't
+    // test a stale cached install. Exact versions are immutable and safe to reuse.
     let should_download = match spec {
         VersionSpec::Exact(_) => !bin.exists(),
         _ => true,
@@ -208,6 +208,16 @@ fn query_version(bin: &Path) -> Result<String, String> {
 }
 
 fn download_and_extract(spec: &VersionSpec, prefix: &Path) -> Result<(), String> {
+    // `edge` is published Linux-only (beamtalk's edge.yml builds just
+    // linux-x86_64); fail fast with a clear message rather than a generic
+    // "no asset downloaded" when requested on another platform.
+    if matches!(spec, VersionSpec::Edge) && std::env::consts::OS != "linux" {
+        return Err(format!(
+            "the `edge` pre-release is Linux-only; on {} use `latest`, `nightly`, or an explicit version",
+            std::env::consts::OS
+        ));
+    }
+
     let (plat, ext) = platform()?;
     let glob = format!("beamtalk-*-{plat}.{ext}");
 
