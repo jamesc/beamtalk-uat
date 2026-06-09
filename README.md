@@ -118,11 +118,13 @@ Two workflows, with distinct jobs:
   `pull_request` and push to `main`. A hermetic `check` job (fmt, clippy, the
   lib unit tests, a build, shellcheck on the setup scripts — no network/Erlang)
   and an `e2e` job that installs Erlang/OTP and runs the full `#[ignore]d`
-  scenario suite against **nightly** on one Linux leg, so harness changes meet a
-  real toolchain before merge. Nightly (not `latest`) because the harness is
-  developed against the toolchain tip — scenarios may exercise features that have
-  landed on `main` but aren't in a tagged release yet. Validating a *specific*
-  released version is the release gate's job (below).
+  scenario suite against **edge** on one Linux leg, so harness changes meet a
+  real toolchain before merge. Edge (not `latest`) because the harness is
+  developed against the toolchain tip — `edge` is the rolling Linux pre-release
+  beamtalk republishes on every merge to `main` (`edge.yml`), so it always
+  carries features that have landed but aren't in a tagged release yet, with no
+  nightly-cadence lag. Validating a *specific* released version is the release
+  gate's job (below).
 - **`.github/workflows/uat.yml`** — the release acceptance gate (below).
 
 The `uat.yml` gate installs a released bundle and runs the full scenario suite

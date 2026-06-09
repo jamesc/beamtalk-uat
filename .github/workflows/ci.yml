@@ -12,14 +12,16 @@
 #   * check — hermetic and fast: fmt, clippy, the lib unit tests, a build, and
 #     shellcheck on the cloud-setup scripts. No network, no Erlang.
 #   * e2e   — installs Erlang/OTP and runs the full #[ignore]d scenario suite
-#     against the NIGHTLY bundle (one Linux leg; the cross-platform matrix lives
-#     in uat.yml). Nightly — not latest — because the harness is developed
-#     against the toolchain tip: scenarios may exercise features that have landed
-#     on main but not yet in a tagged release (e.g. foreign cross-class extension
-#     dispatch, BT-2250, which actor_extension needs). This exercises the drivers
-#     end-to-end before merge — the only place harness changes meet a real
-#     toolchain, since the scenarios need a BEAM runtime the dev box may lack.
-#     The release gate (uat.yml) is what validates a specific tagged version.
+#     against the EDGE bundle (one Linux leg; the cross-platform matrix lives in
+#     uat.yml). Edge — not latest — because the harness is developed against the
+#     toolchain tip: edge is the rolling Linux pre-release beamtalk republishes
+#     on every merge to main (edge.yml), so it always carries features that have
+#     landed but aren't in a tagged release yet (e.g. foreign cross-class
+#     extension dispatch, BT-2250, which actor_extension needs) with no
+#     nightly-cadence lag. This exercises the drivers end-to-end before merge —
+#     the only place harness changes meet a real toolchain, since the scenarios
+#     need a BEAM runtime the dev box may lack. The release gate (uat.yml) is
+#     what validates a specific tagged version.
 
 name: CI
 
@@ -73,7 +75,7 @@ jobs:
         run: shellcheck scripts/setup-cloud.sh .claude/hooks/session-start.sh
 
   e2e:
-    name: E2E scenarios vs nightly
+    name: E2E scenarios vs edge
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -101,9 +103,9 @@ jobs:
       # The harness installs the released bundle via `gh release download` from
       # jamesc/beamtalk, so `gh` must be authenticated. GITHUB_TOKEN works for
       # public-repo release reads; `gh` is preinstalled on GitHub runners.
-      - name: Run scenario suite against nightly
+      - name: Run scenario suite against edge
         shell: bash
         env:
-          BEAMTALK_UAT_VERSION: nightly
+          BEAMTALK_UAT_VERSION: edge
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo test --tests -- --ignored --nocapture
