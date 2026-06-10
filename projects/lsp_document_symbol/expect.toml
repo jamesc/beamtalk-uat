@@ -1,6 +1,0 @@
-# LSP scenario: textDocument/documentSymbol returns the class outline.
-# documentSymbol takes no cursor — it outlines the whole document.
-surface = "lsp"
-method = "textDocument/documentSymbol"
-source = "src/LspDocumentSymbol.bt"
-response_contains = "increment:"

@@ -1,46 +1,72 @@
 // Copyright 2026 James Casey
 // SPDX-License-Identifier: Apache-2.0
 
-//! Scenario discovery, parsing, and assertion driver (BT-2450).
+//! Scenario discovery, parsing, and assertion driver (BT-2450, BT-2480).
 //!
-//! A **scenario** is a directory under `projects/<name>/` containing:
-//!
-//! * A valid `beamtalk.toml` package (sources in `src/`, optional tests in
-//!   `test/`).
-//! * An `expect.toml` file declaring the assertion surface, expected output,
-//!   and (for `run` scenarios) the entrypoint.
+//! A `projects/<name>/` directory is a real Beamtalk package (a **fixture**):
+//! a valid `beamtalk.toml`, sources in `src/`, optional tests in `test/`, and an
+//! `expect.toml`. One fixture declares **one or more scenarios**, each of **one
+//! or more steps** — so the scenario count is decoupled from the project count
+//! (no more one-package-per-assertion sprawl).
 //!
 //! ## `expect.toml` format
 //!
+//! Three shapes are accepted, all parsed by `toml` + `serde`:
+//!
 //! ```toml
-//! # -- BUnit scenario (the default, preferred for deterministic pass/fail) --
-//! surface = "bunit"
-//! # No other fields needed; the driver runs `beamtalk test` and asserts all
-//! # tests pass (exit 0, "0 failed" in stdout).
-//!
-//! # -- Run scenario (script mode: `beamtalk run Class selector`) --
-//! surface = "run"
-//! entrypoint = "Greeter greet"
-//! # At least one of `stdout` or `exit_code` must be present.
-//! stdout = "Hello from smoke!"
-//! exit_code = 0
-//!
-//! # -- CLI scenario (drive a `beamtalk` subcommand directly) --
+//! # -- Flat form (one scenario, one step): the common case --
 //! surface = "cli"
-//! args = "lint --format json"   # appended to `beamtalk`, whitespace-split
-//! exit_code = 1                  # optional; defaults to 0 (success)
-//! stdout_contains = "severity"  # optional substring assertion
-//! stderr_contains = "error"     # optional substring assertion
-//! setup = "new scaffolded_pkg"  # optional: a `beamtalk` cmd run first (exit 0)
-//! cwd = "scaffolded_pkg"        # optional: run `args` in this staged subdir
+//! args = "lint --format json"
+//! exit_code = 1
+//! stdout_contains = "severity"
+//!
+//! # -- Fan-out form ([[scenario]]): many independent scenarios share one
+//! #    fixture package. Each gets a `name`; the display name is `<dir>/<name>`. --
+//! [[scenario]]
+//! name = "hover"
+//! surface = "lsp"
+//! method = "textDocument/hover"
+//! source = "src/Counter.bt"
+//! line = 4
+//! character = 18
+//! response_contains = "Extends:"
+//!
+//! [[scenario]]
+//! name = "document_symbol"
+//! surface = "lsp"
+//! method = "textDocument/documentSymbol"
+//! source = "src/Counter.bt"
+//! response_contains = "increment:"
+//!
+//! # -- Sequence form ([[step]]): ordered steps against ONE live session, so a
+//! #    later step observes an earlier step's side effect. Steps are only valid
+//! #    on session-backed surfaces (`lsp`, `mcp`). Per-step `response_contains`
+//! #    is optional in a multi-step scenario (a side-effect step need only not
+//! #    error). Combine with [[scenario]] via [[scenario.step]]. --
+//! surface = "mcp"
+//! [[step]]
+//! tool = "evaluate"
+//! code = "Counter spawn"       # side effect: create an actor
+//! [[step]]
+//! tool = "workspace_actors"    # observe it
+//! response_contains = "Counter"
 //! ```
 //!
-//! A `cli` scenario runs `beamtalk <args>` in the staged project directory (a
-//! throwaway temp copy, so commands that mutate the tree — `fmt`, `new` — are
-//! isolated). It is the surface for the build/tooling commands that have no REPL
-//! op: `new`, `fmt`, `fmt-check`, `lint`, `type-coverage`, `build`, `--help`, …
-//! Assertions use **substring** matching (not exact, like `run`) because CLI
-//! output embeds absolute paths and version strings that vary per environment.
+//! Per-surface fields:
+//!
+//! * `bunit` — no fields; runs `beamtalk test` and asserts a passing run.
+//! * `run` — `entrypoint = "Class selector"`, plus at least one of `stdout`
+//!   (exact after normalization) / `exit_code`.
+//! * `cli` — `args` (whitespace-split, appended to `beamtalk`), optional
+//!   `exit_code` (default 0), `stdout_contains`, `stderr_contains`, `setup`
+//!   (a `beamtalk` cmd run first, must exit 0), `cwd` (staged subdir to run in).
+//! * `lsp` — `method`, `source`, `response_contains`; position requests also
+//!   need `line` + `character`.
+//! * `mcp` — `tool`, `response_contains` (required for a single-step scenario),
+//!   and either `code` (the `{"code": …}` shortcut) or raw `arguments` JSON.
+//!
+//! `cli`/`lsp`/`mcp` assertions are **substrings**; `run`'s `stdout` is exact
+//! after normalization (CLI output embeds paths/versions that vary per host).
 //!
 //! ## Output normalization
 //!
@@ -48,16 +74,18 @@
 //! leading/trailing whitespace trimmed, internal runs of whitespace collapsed
 //! to a single space, and Erlang PIDs (`<0.123.0>`) replaced with `<pid>`.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
 
 use crate::Toolchain;
 
 // ── Expectation types ───────────────────────────────────────────────────────
 
 /// The assertion surface a scenario exercises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Surface {
     /// Run `beamtalk test` — deterministic pass/fail via BUnit.
     Bunit,
@@ -78,37 +106,42 @@ pub enum Surface {
     Mcp,
 }
 
-/// A parsed `expect.toml` for one scenario.
-#[derive(Debug, Clone)]
-pub struct Expectation {
-    /// Which surface to exercise.
-    pub surface: Surface,
-    /// `Class selector` entrypoint (required for `run`, ignored elsewhere).
+impl Surface {
+    /// Whether a scenario on this surface keeps one live session alive across
+    /// steps — and therefore may carry an ordered `[[step]]` sequence. `cli` /
+    /// `run` / `bunit` spawn a fresh process per action with no shared state.
+    fn is_session_backed(self) -> bool {
+        matches!(self, Surface::Lsp | Surface::Mcp)
+    }
+}
+
+/// One action within a scenario. For a single-step scenario this is the whole
+/// scenario; for a `[[step]]` sequence each entry is one action against the
+/// shared session. Which fields are meaningful depends on the scenario surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Step {
+    /// `Class selector` entrypoint (`run` surface).
     pub entrypoint: Option<String>,
-    /// Arguments appended to `beamtalk` for a `cli` scenario, whitespace-split
-    /// (e.g. `"lint --format json"`). Required for `cli`, ignored elsewhere.
+    /// Arguments appended to `beamtalk`, whitespace-split (`cli` surface).
     pub args: Option<String>,
-    /// Optional `beamtalk` subcommand run *before* `args` for a `cli` scenario
-    /// (whitespace-split, run in the staged project dir, must exit 0). Lets a
-    /// scenario set up state — e.g. `new <pkg>` to scaffold a project the
-    /// asserted command then runs against. Ignored on other surfaces.
+    /// Optional `beamtalk` subcommand run *before* `args` (`cli` surface): lets
+    /// a scenario scaffold state — e.g. `new <pkg>` — that the asserted command
+    /// then runs against. Must exit 0.
     pub setup: Option<String>,
     /// Optional working directory (relative to the staged project dir) the
-    /// asserted `args` run in for a `cli` scenario. Used with `setup` to step
-    /// into a freshly scaffolded sub-package. Defaults to the staged dir.
+    /// asserted `args` run in (`cli` surface). Used with `setup`.
     pub cwd: Option<String>,
-    /// Expected (normalized) stdout, compared *exactly* after normalization
-    /// (`run` surface).
+    /// Expected (normalized) stdout, compared *exactly* (`run` surface).
     pub stdout: Option<String>,
-    /// Substring expected to appear in stdout (`cli` surface).
+    /// Substring expected in stdout (`cli` surface).
     pub stdout_contains: Option<String>,
-    /// Substring expected to appear in stderr (`cli` surface).
+    /// Substring expected in stderr (`cli` surface).
     pub stderr_contains: Option<String>,
-    /// Expected process exit code. For `cli` it defaults to `0` (success); for
-    /// `run` it is only asserted when present.
+    /// Expected process exit code. For `cli` an absent value means "expect
+    /// success" (0); for `run` it is only asserted when present.
     pub exit_code: Option<i32>,
-    /// LSP request method to send (`lsp` surface), e.g.
-    /// `"textDocument/documentSymbol"`.
+    /// LSP request method (`lsp` surface), e.g. `"textDocument/documentSymbol"`.
+    #[serde(rename = "method")]
     pub lsp_method: Option<String>,
     /// Project-relative path of the source file to open (`lsp` surface).
     pub source: Option<String>,
@@ -128,20 +161,57 @@ pub struct Expectation {
     pub arguments: Option<String>,
 }
 
-/// A discovered scenario ready to be driven.
+impl Step {
+    /// Whether every field is unset — used to reject mixing top-level step
+    /// fields with an explicit `[[step]]` sequence. Compared against `default()`
+    /// so a newly added field is covered automatically.
+    fn is_empty(&self) -> bool {
+        *self == Step::default()
+    }
+}
+
+/// A discovered scenario ready to be driven. One fixture directory can yield
+/// several of these (fan-out); each runs against its own staged copy.
 #[derive(Debug, Clone)]
 pub struct Scenario {
-    /// Human-readable name (the directory name under `projects/`).
+    /// Unique display name (e.g. `lsp` or `lsp/hover`).
     pub name: String,
+    /// The `projects/<dir_name>` directory this scenario stages from. Distinct
+    /// from `name`, which may be `<dir_name>/<scenario-name>` under fan-out.
+    pub dir_name: String,
     /// Path to the project directory (inside the repo, not yet staged).
     pub project_dir: PathBuf,
-    /// Parsed expectation.
-    pub expect: Expectation,
+    /// Which surface every step exercises (one surface per scenario — a stepped
+    /// scenario shares a single session, so it cannot mix surfaces).
+    pub surface: Surface,
+    /// Ordered steps. Always at least one; >1 only on session-backed surfaces.
+    pub steps: Vec<Step>,
+}
+
+// ── Raw (serde) wire types ──────────────────────────────────────────────────
+
+/// A scenario as written in `expect.toml`: a surface, an optional name, the
+/// inline single-step action fields (flattened), and an optional `[[step]]`
+/// sequence.
+#[derive(Debug, Clone, Deserialize)]
+struct RawScenario {
+    name: Option<String>,
+    surface: Surface,
+    #[serde(flatten)]
+    action: Step,
+    #[serde(default)]
+    step: Vec<Step>,
+}
+
+/// The `[[scenario]]` (fan-out) form of an `expect.toml`.
+#[derive(Debug, Deserialize)]
+struct ScenarioFile {
+    scenario: Vec<RawScenario>,
 }
 
 // ── Discovery ───────────────────────────────────────────────────────────────
 
-/// Discover all scenarios under `projects/` that have an `expect.toml`.
+/// Discover all scenarios under `projects/` (one or more per `expect.toml`).
 ///
 /// Returns an alphabetically sorted list. Projects without `expect.toml` are
 /// silently skipped — they may be fixture data for other tests.
@@ -159,149 +229,151 @@ pub fn discover(projects_dir: &Path) -> Result<Vec<Scenario>, String> {
         if !expect_path.exists() {
             continue;
         }
-        let name = dir
+        let dir_name = dir
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let expect =
-            parse_expect_toml(&expect_path).map_err(|e| format!("scenario `{name}`: {e}"))?;
-        scenarios.push(Scenario {
-            name,
-            project_dir: dir,
-            expect,
-        });
+        let text = std::fs::read_to_string(&expect_path)
+            .map_err(|e| format!("read {}: {e}", expect_path.display()))?;
+        let parsed = parse_expect_text(&text, &dir_name, &dir)?;
+        scenarios.extend(parsed);
     }
     scenarios.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Guard against duplicate display names (e.g. two `[[scenario]]` entries
+    // with the same `name`), which would make failures ambiguous.
+    for pair in scenarios.windows(2) {
+        if pair[0].name == pair[1].name {
+            return Err(format!("duplicate scenario name `{}`", pair[0].name));
+        }
+    }
     Ok(scenarios)
 }
 
-// ── TOML parser (hand-rolled, no dependencies) ─────────────────────────────
+/// Parse one `expect.toml`'s text into its scenarios.
+fn parse_expect_text(
+    text: &str,
+    dir_name: &str,
+    project_dir: &Path,
+) -> Result<Vec<Scenario>, String> {
+    let value: toml::Value =
+        toml::from_str(text).map_err(|e| format!("scenario `{dir_name}`: invalid TOML: {e}"))?;
 
-/// Parse an `expect.toml` file into an [`Expectation`].
-///
-/// We deliberately avoid pulling in a TOML crate to stay dependency-free. The
-/// format is intentionally minimal (flat key = value, no nested tables), so a
-/// line-oriented parser is sufficient.
-fn parse_expect_toml(path: &Path) -> Result<Expectation, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let kv = parse_flat_toml(&text)?;
-
-    let surface = match kv.get("surface").map(|s| s.as_str()) {
-        Some("bunit") => Surface::Bunit,
-        Some("run") => Surface::Run,
-        Some("cli") => Surface::Cli,
-        Some("lsp") => Surface::Lsp,
-        Some("mcp") => Surface::Mcp,
-        Some(other) => {
+    // `[[scenario]]` (fan-out) form vs. flat (single-scenario) form.
+    let is_array = value.get("scenario").is_some();
+    let raws: Vec<RawScenario> = if is_array {
+        let file: ScenarioFile = value
+            .try_into()
+            .map_err(|e| format!("scenario `{dir_name}`: {e}"))?;
+        if file.scenario.is_empty() {
             return Err(format!(
-                "unknown surface `{other}` (expected `bunit`, `run`, `cli`, `lsp`, or `mcp`)"
-            ))
-        }
-        None => return Err("missing required key `surface`".to_string()),
-    };
-
-    let entrypoint = kv.get("entrypoint").cloned();
-    let args = kv.get("args").cloned();
-    let setup = kv.get("setup").cloned();
-    let cwd = kv.get("cwd").cloned();
-    let stdout = kv.get("stdout").cloned();
-    let stdout_contains = kv.get("stdout_contains").cloned();
-    let stderr_contains = kv.get("stderr_contains").cloned();
-    let exit_code = kv
-        .get("exit_code")
-        .map(|v| {
-            v.parse::<i32>()
-                .map_err(|e| format!("invalid exit_code `{v}`: {e}"))
-        })
-        .transpose()?;
-    let lsp_method = kv.get("method").cloned();
-    let source = kv.get("source").cloned();
-    let parse_u32 = |key: &str| -> Result<Option<u32>, String> {
-        kv.get(key)
-            .map(|v| {
-                v.parse::<u32>()
-                    .map_err(|e| format!("invalid {key} `{v}`: {e}"))
-            })
-            .transpose()
-    };
-    let line = parse_u32("line")?;
-    let character = parse_u32("character")?;
-    let response_contains = kv.get("response_contains").cloned();
-    let tool = kv.get("tool").cloned();
-    let code = kv.get("code").cloned();
-    let arguments = kv.get("arguments").cloned();
-
-    // Validate: run scenarios need an entrypoint.
-    if surface == Surface::Run && entrypoint.is_none() {
-        return Err("`surface = \"run\"` requires an `entrypoint` key".to_string());
-    }
-    // Validate: run scenarios need at least one assertion.
-    if surface == Surface::Run && stdout.is_none() && exit_code.is_none() {
-        return Err(
-            "`surface = \"run\"` requires at least one of `stdout` or `exit_code`".to_string(),
-        );
-    }
-    // Validate: cli scenarios need a command to run.
-    if surface == Surface::Cli && args.is_none() {
-        return Err("`surface = \"cli\"` requires an `args` key".to_string());
-    }
-    // Validate: lsp scenarios need a method, a source file, and an assertion.
-    if surface == Surface::Lsp {
-        if lsp_method.is_none() {
-            return Err("`surface = \"lsp\"` requires a `method` key".to_string());
-        }
-        if source.is_none() {
-            return Err("`surface = \"lsp\"` requires a `source` key".to_string());
-        }
-        if response_contains.is_none() {
-            return Err("`surface = \"lsp\"` requires a `response_contains` key".to_string());
-        }
-        // Position-based requests need a cursor.
-        if lsp_needs_position(lsp_method.as_deref().unwrap())
-            && (line.is_none() || character.is_none())
-        {
-            return Err(format!(
-                "lsp method `{}` requires `line` and `character`",
-                lsp_method.as_deref().unwrap()
+                "scenario `{dir_name}`: `[[scenario]]` array is empty"
             ));
         }
-    }
-    // Validate: mcp scenarios need a tool and an assertion.
-    if surface == Surface::Mcp {
-        if tool.is_none() {
-            return Err("`surface = \"mcp\"` requires a `tool` key".to_string());
-        }
-        if response_contains.is_none() {
-            return Err("`surface = \"mcp\"` requires a `response_contains` key".to_string());
-        }
-        if code.is_some() && arguments.is_some() {
-            return Err(
-                "`surface = \"mcp\"`: use either `code` or `arguments`, not both".to_string(),
-            );
-        }
-    }
+        file.scenario
+    } else {
+        vec![value
+            .try_into()
+            .map_err(|e| format!("scenario `{dir_name}`: {e}"))?]
+    };
 
-    Ok(Expectation {
-        surface,
-        entrypoint,
-        args,
-        setup,
-        cwd,
-        stdout,
-        stdout_contains,
-        stderr_contains,
-        exit_code,
-        lsp_method,
-        source,
-        line,
-        character,
-        response_contains,
-        tool,
-        code,
-        arguments,
-    })
+    let mut out = Vec::with_capacity(raws.len());
+    for (i, raw) in raws.into_iter().enumerate() {
+        // Display name: `<dir>` for the flat form, `<dir>/<name-or-index>` for
+        // fan-out so each scenario is addressable.
+        let display = match (&raw.name, is_array) {
+            (Some(n), _) => format!("{dir_name}/{n}"),
+            (None, true) => format!("{dir_name}/{i}"),
+            (None, false) => dir_name.to_string(),
+        };
+
+        // Resolve steps: an explicit `[[step]]` sequence, or the inline action
+        // as a single step.
+        let steps = if raw.step.is_empty() {
+            vec![raw.action]
+        } else {
+            if !raw.action.is_empty() {
+                return Err(format!(
+                    "scenario `{display}`: set either top-level step fields or `[[step]]`, not both"
+                ));
+            }
+            if !raw.surface.is_session_backed() {
+                return Err(format!(
+                    "scenario `{display}`: `[[step]]` sequences require a session-backed surface \
+                     (`lsp` or `mcp`); `{:?}` spawns a fresh process per step with no shared state",
+                    raw.surface
+                ));
+            }
+            raw.step
+        };
+
+        let multi = steps.len() > 1;
+        for (si, step) in steps.iter().enumerate() {
+            validate_step(raw.surface, step, multi)
+                .map_err(|e| format!("scenario `{display}` step {}: {e}", si + 1))?;
+        }
+
+        out.push(Scenario {
+            name: display,
+            dir_name: dir_name.to_string(),
+            project_dir: project_dir.to_path_buf(),
+            surface: raw.surface,
+            steps,
+        });
+    }
+    Ok(out)
+}
+
+/// Validate one step's fields against its surface. `multi` is true when the step
+/// is part of a multi-step sequence (which relaxes some single-step requirements).
+fn validate_step(surface: Surface, step: &Step, multi: bool) -> Result<(), String> {
+    match surface {
+        Surface::Bunit => {}
+        Surface::Run => {
+            if step.entrypoint.is_none() {
+                return Err("`run` requires an `entrypoint`".to_string());
+            }
+            if step.stdout.is_none() && step.exit_code.is_none() {
+                return Err("`run` requires at least one of `stdout` or `exit_code`".to_string());
+            }
+        }
+        Surface::Cli => {
+            if step.args.is_none() {
+                return Err("`cli` requires an `args` key".to_string());
+            }
+        }
+        Surface::Lsp => {
+            let Some(method) = step.lsp_method.as_deref() else {
+                return Err("`lsp` requires a `method` key".to_string());
+            };
+            if step.source.is_none() {
+                return Err("`lsp` requires a `source` key".to_string());
+            }
+            if step.response_contains.is_none() {
+                return Err("`lsp` requires a `response_contains` key".to_string());
+            }
+            if lsp_needs_position(method) && (step.line.is_none() || step.character.is_none()) {
+                return Err(format!(
+                    "lsp method `{method}` requires `line` and `character`"
+                ));
+            }
+        }
+        Surface::Mcp => {
+            if step.tool.is_none() {
+                return Err("`mcp` requires a `tool` key".to_string());
+            }
+            // A lone step must assert something; in a sequence a side-effect
+            // step may omit `response_contains` (it only needs to not error).
+            if !multi && step.response_contains.is_none() {
+                return Err("`mcp` requires a `response_contains` key".to_string());
+            }
+            if step.code.is_some() && step.arguments.is_some() {
+                return Err("`mcp`: use either `code` or `arguments`, not both".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether an LSP method takes a `position` (cursor) in its params. Outline /
@@ -318,79 +390,6 @@ fn lsp_needs_position(method: &str) -> bool {
             | "textDocument/prepareCallHierarchy"
             | "textDocument/prepareTypeHierarchy"
     )
-}
-
-/// Parse a flat TOML file (no tables, arrays, or inline tables) into a
-/// `BTreeMap<key, value>`. String values are unquoted; bare values are kept
-/// as-is. Comments (`#`) and blank lines are skipped.
-fn parse_flat_toml(text: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut map = BTreeMap::new();
-    for (i, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key, rest)) = trimmed.split_once('=') else {
-            return Err(format!(
-                "line {}: expected `key = value`, got `{trimmed}`",
-                i + 1
-            ));
-        };
-        let key = key.trim().to_string();
-        let value = unquote_toml_value(rest.trim());
-        map.insert(key, value);
-    }
-    Ok(map)
-}
-
-/// Strip a trailing inline comment (`# ...`) from a bare (unquoted) value.
-///
-/// TOML allows `key = value  # comment` but our flat parser doesn't distinguish
-/// that from the value itself. We only strip for bare values — quoted strings
-/// are handled by `unquote_toml_value` which already stops at the closing `"`.
-fn strip_inline_comment(s: &str) -> &str {
-    // If the value is quoted, the comment is outside the quotes — don't strip.
-    if s.starts_with('"') {
-        return s;
-    }
-    // Find the first `#` and trim trailing whitespace before it.
-    match s.find('#') {
-        Some(idx) => s[..idx].trim_end(),
-        None => s,
-    }
-}
-
-/// Strip surrounding double quotes from a TOML string value; pass bare values
-/// through unchanged.
-fn unquote_toml_value(s: &str) -> String {
-    let s = strip_inline_comment(s);
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
-        // Handle basic TOML string escapes.
-        let inner = &s[1..s.len() - 1];
-        let mut out = String::with_capacity(inner.len());
-        let mut chars = inner.chars();
-        while let Some(c) = chars.next() {
-            if c == '\\' {
-                match chars.next() {
-                    Some('n') => out.push('\n'),
-                    Some('t') => out.push('\t'),
-                    Some('\\') => out.push('\\'),
-                    Some('"') => out.push('"'),
-                    Some(other) => {
-                        out.push('\\');
-                        out.push(other);
-                    }
-                    None => out.push('\\'),
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    } else {
-        s.to_string()
-    }
 }
 
 // ── Output normalization ────────────────────────────────────────────────────
@@ -508,24 +507,34 @@ pub fn run(tc: &Toolchain, scenario: &Scenario) -> Outcome {
 }
 
 fn run_inner(tc: &Toolchain, scenario: &Scenario) -> Result<(), String> {
-    let staged = crate::stage_project(&scenario.name);
+    let staged = crate::stage_project(&scenario.dir_name);
+    let path = staged.path();
 
-    match scenario.expect.surface {
-        Surface::Bunit => run_bunit(tc, staged.path(), &scenario.name),
-        Surface::Run => run_entrypoint(tc, staged.path(), scenario),
-        Surface::Cli => run_cli(tc, staged.path(), scenario),
-        Surface::Lsp => run_lsp(tc, staged.path(), scenario),
-        Surface::Mcp => run_mcp(tc, staged.path(), scenario),
+    // Non-session surfaces always have exactly one step (enforced at parse).
+    match scenario.surface {
+        Surface::Bunit => run_bunit(tc, path, &scenario.name),
+        Surface::Run => run_entrypoint(tc, path, scenario, &scenario.steps[0]),
+        Surface::Cli => run_cli(tc, path, scenario, &scenario.steps[0]),
+        Surface::Lsp => run_lsp(tc, path, scenario),
+        Surface::Mcp => run_mcp(tc, path, scenario),
+    }
+}
+
+/// Label a step for failure messages: bare `(detail)` for a single-step
+/// scenario, `step k/n (detail)` for a sequence.
+fn step_label(scenario: &Scenario, idx: usize, detail: &str) -> String {
+    let n = scenario.steps.len();
+    if n > 1 {
+        format!("step {}/{n} ({detail})", idx + 1)
+    } else {
+        format!("({detail})")
     }
 }
 
 /// Drive an `mcp` scenario: start `beamtalk-mcp --start` (which boots a live
-/// workspace), call the declared tool, and assert the response substring.
+/// workspace) once, run every step against that one session, then assert each
+/// step's response substring.
 fn run_mcp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
-    let e = &scenario.expect;
-    let tool = e.tool.as_deref().unwrap();
-    let needle = e.response_contains.as_deref().unwrap();
-
     let bin_dir = tc
         .bin
         .parent()
@@ -543,37 +552,45 @@ fn run_mcp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
         ));
     }
 
-    // Build the tool arguments: `code = "..."` is a shortcut for the evaluate
-    // shape; otherwise use the raw `arguments` JSON, defaulting to `{}`.
-    let arguments = if let Some(code) = e.code.as_deref() {
-        format!(r#"{{"code":"{}"}}"#, crate::lsp::json_escape(code))
-    } else {
-        e.arguments.clone().unwrap_or_else(|| "{}".to_string())
-    };
-
     let result = (|| -> Result<(), String> {
         let mut client = crate::mcp::McpClient::start(&mcp_bin, project, &bin_dir)?;
         client.initialize()?;
-        let response = client.call_tool(tool, &arguments)?;
 
-        // A JSON-RPC error, or a tool result flagged `isError`, is a failure.
-        if response.contains("\"error\"") && !response.contains("\"isError\":false") {
-            return Err(format!(
-                "scenario `{}` (mcp `{tool}`): server returned an error:\n{response}",
-                scenario.name
-            ));
-        }
-        if response.contains("\"isError\":true") || response.contains("\"isError\": true") {
-            return Err(format!(
-                "scenario `{}` (mcp `{tool}`): tool reported isError:\n{response}",
-                scenario.name
-            ));
-        }
-        if !response.contains(needle) {
-            return Err(format!(
-                "scenario `{}` (mcp `{tool}`): response missing expected substring {needle:?}\n--- response ---\n{response}",
-                scenario.name
-            ));
+        for (i, step) in scenario.steps.iter().enumerate() {
+            let tool = step.tool.as_deref().unwrap();
+            let label = step_label(scenario, i, &format!("mcp `{tool}`"));
+
+            // `code = "..."` is a shortcut for the evaluate shape; otherwise use
+            // the raw `arguments` JSON, defaulting to `{}`.
+            let arguments = if let Some(code) = step.code.as_deref() {
+                format!(r#"{{"code":"{}"}}"#, crate::lsp::json_escape(code))
+            } else {
+                step.arguments.clone().unwrap_or_else(|| "{}".to_string())
+            };
+
+            let response = client.call_tool(tool, &arguments)?;
+
+            // A JSON-RPC error, or a tool result flagged `isError`, is a failure.
+            if response.contains("\"error\"") && !response.contains("\"isError\":false") {
+                return Err(format!(
+                    "scenario `{}` {label}: server returned an error:\n{response}",
+                    scenario.name
+                ));
+            }
+            if response.contains("\"isError\":true") || response.contains("\"isError\": true") {
+                return Err(format!(
+                    "scenario `{}` {label}: tool reported isError:\n{response}",
+                    scenario.name
+                ));
+            }
+            if let Some(needle) = step.response_contains.as_deref() {
+                if !response.contains(needle) {
+                    return Err(format!(
+                        "scenario `{}` {label}: response missing expected substring {needle:?}\n--- response ---\n{response}",
+                        scenario.name
+                    ));
+                }
+            }
         }
         Ok(())
     })();
@@ -597,13 +614,9 @@ fn run_mcp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
     result
 }
 
-/// Drive an `lsp` scenario: start `beamtalk-lsp`, open the source file, send the
-/// declared request, and assert the response contains the expected substring.
+/// Drive an `lsp` scenario: start `beamtalk-lsp` once, then for each step open
+/// its source file, send the declared request, and assert the response.
 fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
-    let e = &scenario.expect;
-    let method = e.lsp_method.as_deref().unwrap();
-    let needle = e.response_contains.as_deref().unwrap();
-
     // The language server ships next to `beamtalk` in the bundle's `bin/`.
     let lsp_bin = tc.bin.with_file_name(if cfg!(windows) {
         "beamtalk-lsp.exe"
@@ -617,46 +630,52 @@ fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
         ));
     }
 
-    let src_rel = e.source.as_deref().unwrap();
-    let src_path = project.join(src_rel);
-    let text = std::fs::read_to_string(&src_path)
-        .map_err(|err| format!("read source {}: {err}", src_path.display()))?;
-    let abs = src_path.canonicalize().unwrap_or_else(|_| src_path.clone());
-    let uri = path_to_uri(&abs);
-    let root_uri = path_to_uri(project);
-
     let mut client = crate::lsp::LspClient::start(&lsp_bin)?;
+    let root_uri = path_to_uri(project);
     client.initialize(&root_uri)?;
-    client.did_open(&uri, &text)?;
 
-    // Build params: every request targets the open document; position-based ones
-    // add a cursor; formatting needs FormattingOptions.
-    let td = format!(r#"{{"uri":"{}"}}"#, crate::lsp::json_escape(&uri));
-    let params = if lsp_needs_position(method) {
-        format!(
-            r#"{{"textDocument":{td},"position":{{"line":{},"character":{}}}}}"#,
-            e.line.unwrap(),
-            e.character.unwrap()
-        )
-    } else if method == "textDocument/formatting" {
-        format!(r#"{{"textDocument":{td},"options":{{"tabSize":2,"insertSpaces":true}}}}"#)
-    } else {
-        format!(r#"{{"textDocument":{td}}}"#)
-    };
+    for (i, step) in scenario.steps.iter().enumerate() {
+        let method = step.lsp_method.as_deref().unwrap();
+        let needle = step.response_contains.as_deref().unwrap();
+        let label = step_label(scenario, i, &format!("`{method}`"));
 
-    let response = client.request(method, &params)?;
+        let src_rel = step.source.as_deref().unwrap();
+        let src_path = project.join(src_rel);
+        let text = std::fs::read_to_string(&src_path)
+            .map_err(|err| format!("read source {}: {err}", src_path.display()))?;
+        let abs = src_path.canonicalize().unwrap_or_else(|_| src_path.clone());
+        let uri = path_to_uri(&abs);
+        client.did_open(&uri, &text)?;
 
-    if response.contains("\"error\"") {
-        return Err(format!(
-            "scenario `{}` (`{method}`): server returned an error:\n{response}",
-            scenario.name
-        ));
-    }
-    if !response.contains(needle) {
-        return Err(format!(
-            "scenario `{}` (`{method}`): response missing expected substring {needle:?}\n--- response ---\n{response}",
-            scenario.name
-        ));
+        // Build params: every request targets the open document; position-based
+        // ones add a cursor; formatting needs FormattingOptions.
+        let td = format!(r#"{{"uri":"{}"}}"#, crate::lsp::json_escape(&uri));
+        let params = if lsp_needs_position(method) {
+            format!(
+                r#"{{"textDocument":{td},"position":{{"line":{},"character":{}}}}}"#,
+                step.line.unwrap(),
+                step.character.unwrap()
+            )
+        } else if method == "textDocument/formatting" {
+            format!(r#"{{"textDocument":{td},"options":{{"tabSize":2,"insertSpaces":true}}}}"#)
+        } else {
+            format!(r#"{{"textDocument":{td}}}"#)
+        };
+
+        let response = client.request(method, &params)?;
+
+        if response.contains("\"error\"") {
+            return Err(format!(
+                "scenario `{}` {label}: server returned an error:\n{response}",
+                scenario.name
+            ));
+        }
+        if !response.contains(needle) {
+            return Err(format!(
+                "scenario `{}` {label}: response missing expected substring {needle:?}\n--- response ---\n{response}",
+                scenario.name
+            ));
+        }
     }
     Ok(())
 }
@@ -674,8 +693,8 @@ fn path_to_uri(path: &Path) -> String {
 
 /// Drive a `cli` scenario: run `beamtalk <args>` in the staged project dir and
 /// assert exit code (defaulting to `0`) plus optional stdout/stderr substrings.
-fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
-    let raw = scenario.expect.args.as_deref().unwrap();
+fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario, step: &Step) -> Result<(), String> {
+    let raw = step.args.as_deref().unwrap();
     let args: Vec<&str> = raw.split_whitespace().collect();
     if args.is_empty() {
         return Err(format!(
@@ -686,7 +705,7 @@ fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
 
     // Optional setup command (e.g. `new <pkg>` to scaffold a project the
     // asserted command then runs against). Must exit 0.
-    if let Some(raw_setup) = scenario.expect.setup.as_deref() {
+    if let Some(raw_setup) = step.setup.as_deref() {
         let setup_args: Vec<&str> = raw_setup.split_whitespace().collect();
         if setup_args.is_empty() {
             return Err(format!(
@@ -711,7 +730,7 @@ fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
 
     // The asserted command may run in a subdirectory of the staged project
     // (e.g. the package `setup` just scaffolded).
-    let work_dir = match scenario.expect.cwd.as_deref() {
+    let work_dir = match step.cwd.as_deref() {
         Some(sub) => project.join(sub),
         None => project.to_path_buf(),
     };
@@ -726,7 +745,7 @@ fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
     let mut errors = Vec::new();
 
     // Assert exit code — for cli, an absent `exit_code` means "expect success".
-    let expected_code = scenario.expect.exit_code.unwrap_or(0);
+    let expected_code = step.exit_code.unwrap_or(0);
     let actual_code = out.status.code().unwrap_or(-1);
     if actual_code != expected_code {
         errors.push(format!(
@@ -737,12 +756,12 @@ fn run_cli(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    if let Some(ref needle) = scenario.expect.stdout_contains {
+    if let Some(ref needle) = step.stdout_contains {
         if !stdout.contains(needle.as_str()) {
             errors.push(format!("stdout missing expected substring: {needle:?}"));
         }
     }
-    if let Some(ref needle) = scenario.expect.stderr_contains {
+    if let Some(ref needle) = step.stderr_contains {
         if !stderr.contains(needle.as_str()) {
             errors.push(format!("stderr missing expected substring: {needle:?}"));
         }
@@ -787,8 +806,13 @@ fn run_bunit(tc: &Toolchain, project: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn run_entrypoint(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), String> {
-    let entrypoint = scenario.expect.entrypoint.as_deref().unwrap();
+fn run_entrypoint(
+    tc: &Toolchain,
+    project: &Path,
+    scenario: &Scenario,
+    step: &Step,
+) -> Result<(), String> {
+    let entrypoint = step.entrypoint.as_deref().unwrap();
     let parts: Vec<&str> = entrypoint.split_whitespace().collect();
     if parts.len() < 2 {
         return Err(format!(
@@ -823,7 +847,7 @@ fn run_entrypoint(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result
     let mut errors = Vec::new();
 
     // Assert exit code.
-    if let Some(expected_code) = scenario.expect.exit_code {
+    if let Some(expected_code) = step.exit_code {
         let actual_code = out.status.code().unwrap_or(-1);
         if actual_code != expected_code {
             errors.push(format!(
@@ -833,7 +857,7 @@ fn run_entrypoint(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result
     }
 
     // Assert stdout.
-    if let Some(ref expected_stdout) = scenario.expect.stdout {
+    if let Some(ref expected_stdout) = step.stdout {
         let actual = normalize(&String::from_utf8_lossy(&out.stdout));
         let expected = normalize(expected_stdout);
         if actual != expected {
@@ -882,51 +906,252 @@ fn indent(text: &str, prefix: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Parse a flat (single-scenario) `expect.toml`, returning its one scenario.
+    fn parse_one(text: &str) -> Result<Scenario, String> {
+        let mut v = parse_expect_text(text, "d", Path::new("/x"))?;
+        assert_eq!(v.len(), 1, "expected exactly one scenario");
+        Ok(v.pop().unwrap())
+    }
+
     #[test]
     fn parse_bunit_expect() {
-        let toml = "surface = \"bunit\"\n";
-        let kv = parse_flat_toml(toml).unwrap();
-        assert_eq!(kv["surface"], "bunit");
+        let s = parse_one("surface = \"bunit\"\n").unwrap();
+        assert_eq!(s.surface, Surface::Bunit);
+        assert_eq!(s.name, "d");
+        assert_eq!(s.steps.len(), 1);
     }
 
     #[test]
     fn parse_run_expect() {
-        let toml = r#"
-surface = "run"
-entrypoint = "Greeter greet"
-stdout = "Hello!"
-exit_code = 0
+        let s = parse_one(
+            "surface = \"run\"\nentrypoint = \"Greeter greet\"\nstdout = \"Hello!\"\nexit_code = 0\n",
+        )
+        .unwrap();
+        assert_eq!(s.surface, Surface::Run);
+        let step = &s.steps[0];
+        assert_eq!(step.entrypoint.as_deref(), Some("Greeter greet"));
+        assert_eq!(step.stdout.as_deref(), Some("Hello!"));
+        assert_eq!(step.exit_code, Some(0));
+    }
+
+    #[test]
+    fn rejects_run_without_entrypoint() {
+        let err = parse_one("surface = \"run\"\nstdout = \"hi\"\n").unwrap_err();
+        assert!(err.contains("entrypoint"));
+    }
+
+    #[test]
+    fn rejects_run_without_assertion() {
+        let err = parse_one("surface = \"run\"\nentrypoint = \"Foo bar\"\n").unwrap_err();
+        assert!(err.contains("stdout"));
+    }
+
+    #[test]
+    fn parse_cli_expect() {
+        let s = parse_one(
+            "surface = \"cli\"\nargs = \"lint --format json\"\nexit_code = 1\nstdout_contains = \"severity\"\n",
+        )
+        .unwrap();
+        assert_eq!(s.surface, Surface::Cli);
+        let step = &s.steps[0];
+        assert_eq!(step.args.as_deref(), Some("lint --format json"));
+        assert_eq!(step.exit_code, Some(1));
+        assert_eq!(step.stdout_contains.as_deref(), Some("severity"));
+    }
+
+    #[test]
+    fn parse_cli_expect_with_setup_and_cwd() {
+        let s = parse_one(
+            "surface = \"cli\"\nsetup = \"new pkg\"\ncwd = \"pkg\"\nargs = \"fmt-check\"\nexit_code = 0\n",
+        )
+        .unwrap();
+        let step = &s.steps[0];
+        assert_eq!(step.setup.as_deref(), Some("new pkg"));
+        assert_eq!(step.cwd.as_deref(), Some("pkg"));
+        assert_eq!(step.args.as_deref(), Some("fmt-check"));
+    }
+
+    #[test]
+    fn rejects_cli_without_args() {
+        let err = parse_one("surface = \"cli\"\nexit_code = 0\n").unwrap_err();
+        assert!(err.contains("args"));
+    }
+
+    #[test]
+    fn cli_exit_code_absent_is_allowed() {
+        let s = parse_one("surface = \"cli\"\nargs = \"--help\"\n").unwrap();
+        assert_eq!(s.steps[0].exit_code, None);
+    }
+
+    #[test]
+    fn parse_lsp_expect() {
+        let s = parse_one(
+            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nsource = \"src/Foo.bt\"\nline = 4\ncharacter = 18\nresponse_contains = \"Extends:\"\n",
+        )
+        .unwrap();
+        assert_eq!(s.surface, Surface::Lsp);
+        let step = &s.steps[0];
+        assert_eq!(step.lsp_method.as_deref(), Some("textDocument/hover"));
+        assert_eq!(step.source.as_deref(), Some("src/Foo.bt"));
+        assert_eq!(step.line, Some(4));
+        assert_eq!(step.character, Some(18));
+    }
+
+    #[test]
+    fn lsp_document_symbol_needs_no_position() {
+        let s = parse_one(
+            "surface = \"lsp\"\nmethod = \"textDocument/documentSymbol\"\nsource = \"src/Foo.bt\"\nresponse_contains = \"increment:\"\n",
+        )
+        .unwrap();
+        assert_eq!(s.steps[0].line, None);
+        assert_eq!(s.steps[0].character, None);
+    }
+
+    #[test]
+    fn rejects_lsp_without_required_keys() {
+        let err = parse_one(
+            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nresponse_contains = \"x\"\nline = 0\ncharacter = 0\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("source"));
+
+        let err = parse_one(
+            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nsource = \"src/Foo.bt\"\nresponse_contains = \"x\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("line") && err.contains("character"));
+    }
+
+    #[test]
+    fn parse_mcp_expect() {
+        let s = parse_one(
+            "surface = \"mcp\"\ntool = \"evaluate\"\ncode = \"1 + 1\"\nresponse_contains = \"2\"\n",
+        )
+        .unwrap();
+        assert_eq!(s.surface, Surface::Mcp);
+        let step = &s.steps[0];
+        assert_eq!(step.tool.as_deref(), Some("evaluate"));
+        assert_eq!(step.code.as_deref(), Some("1 + 1"));
+        assert_eq!(step.response_contains.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn rejects_mcp_without_tool() {
+        let err = parse_one("surface = \"mcp\"\nresponse_contains = \"2\"\n").unwrap_err();
+        assert!(err.contains("tool"));
+    }
+
+    #[test]
+    fn rejects_mcp_code_and_arguments() {
+        let err = parse_one(
+            "surface = \"mcp\"\ntool = \"evaluate\"\ncode = \"1\"\narguments = \"{}\"\nresponse_contains = \"x\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("code") && err.contains("arguments"));
+    }
+
+    // ── BT-2480: fan-out + sequence forms ────────────────────────────────────
+
+    #[test]
+    fn fan_out_yields_one_scenario_per_entry() {
+        let text = r#"
+[[scenario]]
+name = "hover"
+surface = "lsp"
+method = "textDocument/hover"
+source = "src/Foo.bt"
+line = 4
+character = 18
+response_contains = "Extends:"
+
+[[scenario]]
+name = "symbols"
+surface = "lsp"
+method = "textDocument/documentSymbol"
+source = "src/Foo.bt"
+response_contains = "increment:"
 "#;
-        let kv = parse_flat_toml(toml).unwrap();
-        assert_eq!(kv["surface"], "run");
-        assert_eq!(kv["entrypoint"], "Greeter greet");
-        assert_eq!(kv["stdout"], "Hello!");
-        assert_eq!(kv["exit_code"], "0");
+        let scns = parse_expect_text(text, "lsp", Path::new("/x")).unwrap();
+        assert_eq!(scns.len(), 2);
+        assert_eq!(scns[0].name, "lsp/hover");
+        assert_eq!(scns[1].name, "lsp/symbols");
+        // Both stage from the same fixture dir.
+        assert_eq!(scns[0].dir_name, "lsp");
+        assert_eq!(scns[1].dir_name, "lsp");
     }
 
     #[test]
-    fn unquote_handles_escapes() {
-        assert_eq!(unquote_toml_value(r#""hello\nworld""#), "hello\nworld");
-        assert_eq!(unquote_toml_value(r#""tab\there""#), "tab\there");
-        assert_eq!(unquote_toml_value(r#""a\\b""#), "a\\b");
+    fn mcp_step_sequence_parses_multiple_steps() {
+        let text = r#"
+[[scenario]]
+name = "create-and-list"
+surface = "mcp"
+[[scenario.step]]
+tool = "evaluate"
+code = "Counter spawn"
+[[scenario.step]]
+tool = "workspace_actors"
+response_contains = "Counter"
+"#;
+        let scns = parse_expect_text(text, "actors", Path::new("/x")).unwrap();
+        assert_eq!(scns.len(), 1);
+        assert_eq!(scns[0].name, "actors/create-and-list");
+        assert_eq!(scns[0].steps.len(), 2);
+        // First step is a side effect with no assertion — allowed in a sequence.
+        assert_eq!(scns[0].steps[0].response_contains, None);
+        assert_eq!(
+            scns[0].steps[1].response_contains.as_deref(),
+            Some("Counter")
+        );
     }
 
     #[test]
-    fn unquote_bare_value() {
-        assert_eq!(unquote_toml_value("42"), "42");
+    fn flat_step_sequence_parses() {
+        let text = r#"
+surface = "mcp"
+[[step]]
+tool = "evaluate"
+code = "Counter spawn"
+[[step]]
+tool = "evaluate"
+code = "1 + 1"
+response_contains = "2"
+"#;
+        let s = parse_one(text).unwrap();
+        assert_eq!(s.steps.len(), 2);
     }
 
     #[test]
-    fn inline_comments_stripped_from_bare_values() {
-        assert_eq!(unquote_toml_value("0  # optional"), "0");
-        assert_eq!(unquote_toml_value("42 # the answer"), "42");
+    fn rejects_steps_on_non_session_surface() {
+        let text = r#"
+surface = "cli"
+[[step]]
+args = "lint"
+"#;
+        let err = parse_expect_text(text, "d", Path::new("/x")).unwrap_err();
+        assert!(err.contains("session-backed"));
     }
 
     #[test]
-    fn inline_comments_not_stripped_from_quoted_values() {
-        // A `#` inside quotes is part of the value; one outside is stripped
-        // by `strip_inline_comment` before unquoting.
-        assert_eq!(unquote_toml_value(r#""has # inside""#), "has # inside");
+    fn rejects_mixing_inline_action_with_steps() {
+        let text = r#"
+surface = "mcp"
+tool = "evaluate"
+code = "1"
+response_contains = "1"
+[[step]]
+tool = "evaluate"
+code = "2"
+response_contains = "2"
+"#;
+        let err = parse_expect_text(text, "d", Path::new("/x")).unwrap_err();
+        assert!(err.contains("not both"));
+    }
+
+    #[test]
+    fn parse_skips_comments() {
+        let s = parse_one("# a comment\nsurface = \"cli\"\nargs = \"lint\"  # trailing\n").unwrap();
+        assert_eq!(s.steps[0].args.as_deref(), Some("lint"));
     }
 
     #[test]
@@ -943,189 +1168,6 @@ exit_code = 0
     #[test]
     fn normalize_keeps_non_pids() {
         assert_eq!(normalize("<not a pid>"), "<not a pid>");
-    }
-
-    #[test]
-    fn parse_flat_toml_skips_comments() {
-        let toml = "# a comment\nkey = \"val\"\n";
-        let kv = parse_flat_toml(toml).unwrap();
-        assert_eq!(kv.len(), 1);
-        assert_eq!(kv["key"], "val");
-    }
-
-    #[test]
-    fn parse_expect_toml_rejects_run_without_entrypoint() {
-        let dir = std::env::temp_dir().join("bt-uat-test-no-entry");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(&path, "surface = \"run\"\nstdout = \"hi\"\n").unwrap();
-        let result = parse_expect_toml(&path);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("entrypoint"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_expect_toml_rejects_run_without_assertion() {
-        let dir = std::env::temp_dir().join("bt-uat-test-no-assert");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(&path, "surface = \"run\"\nentrypoint = \"Foo bar\"\n").unwrap();
-        let result = parse_expect_toml(&path);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("stdout"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_cli_expect() {
-        let dir = std::env::temp_dir().join("bt-uat-test-cli-ok");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(
-            &path,
-            "surface = \"cli\"\nargs = \"lint --format json\"\nexit_code = 1\nstdout_contains = \"severity\"\n",
-        )
-        .unwrap();
-        let expect = parse_expect_toml(&path).unwrap();
-        assert_eq!(expect.surface, Surface::Cli);
-        assert_eq!(expect.args.as_deref(), Some("lint --format json"));
-        assert_eq!(expect.exit_code, Some(1));
-        assert_eq!(expect.stdout_contains.as_deref(), Some("severity"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_cli_expect_with_setup_and_cwd() {
-        let dir = std::env::temp_dir().join("bt-uat-test-cli-setup");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(
-            &path,
-            "surface = \"cli\"\nsetup = \"new pkg\"\ncwd = \"pkg\"\nargs = \"fmt-check\"\nexit_code = 0\n",
-        )
-        .unwrap();
-        let expect = parse_expect_toml(&path).unwrap();
-        assert_eq!(expect.surface, Surface::Cli);
-        assert_eq!(expect.setup.as_deref(), Some("new pkg"));
-        assert_eq!(expect.cwd.as_deref(), Some("pkg"));
-        assert_eq!(expect.args.as_deref(), Some("fmt-check"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_expect_toml_rejects_cli_without_args() {
-        let dir = std::env::temp_dir().join("bt-uat-test-cli-no-args");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(&path, "surface = \"cli\"\nexit_code = 0\n").unwrap();
-        let result = parse_expect_toml(&path);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("args"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_cli_expect_defaults_exit_code_absent() {
-        // An absent exit_code is allowed for cli (the driver treats it as 0).
-        let dir = std::env::temp_dir().join("bt-uat-test-cli-default");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(&path, "surface = \"cli\"\nargs = \"--help\"\n").unwrap();
-        let expect = parse_expect_toml(&path).unwrap();
-        assert_eq!(expect.exit_code, None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn write_expect(name: &str, body: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("expect.toml");
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-
-    #[test]
-    fn parse_lsp_expect() {
-        let path = write_expect(
-            "bt-uat-test-lsp-ok",
-            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nsource = \"src/Foo.bt\"\nline = 4\ncharacter = 18\nresponse_contains = \"Extends:\"\n",
-        );
-        let e = parse_expect_toml(&path).unwrap();
-        assert_eq!(e.surface, Surface::Lsp);
-        assert_eq!(e.lsp_method.as_deref(), Some("textDocument/hover"));
-        assert_eq!(e.source.as_deref(), Some("src/Foo.bt"));
-        assert_eq!(e.line, Some(4));
-        assert_eq!(e.character, Some(18));
-        assert_eq!(e.response_contains.as_deref(), Some("Extends:"));
-    }
-
-    #[test]
-    fn parse_lsp_document_symbol_needs_no_position() {
-        let path = write_expect(
-            "bt-uat-test-lsp-symbols",
-            "surface = \"lsp\"\nmethod = \"textDocument/documentSymbol\"\nsource = \"src/Foo.bt\"\nresponse_contains = \"increment:\"\n",
-        );
-        let e = parse_expect_toml(&path).unwrap();
-        assert_eq!(e.line, None);
-        assert_eq!(e.character, None);
-    }
-
-    #[test]
-    fn parse_expect_toml_rejects_lsp_without_required_keys() {
-        // Missing source.
-        let path = write_expect(
-            "bt-uat-test-lsp-no-source",
-            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nresponse_contains = \"x\"\nline = 0\ncharacter = 0\n",
-        );
-        assert!(parse_expect_toml(&path).unwrap_err().contains("source"));
-
-        // Position method missing the cursor.
-        let path = write_expect(
-            "bt-uat-test-lsp-no-pos",
-            "surface = \"lsp\"\nmethod = \"textDocument/hover\"\nsource = \"src/Foo.bt\"\nresponse_contains = \"x\"\n",
-        );
-        let err = parse_expect_toml(&path).unwrap_err();
-        assert!(err.contains("line") && err.contains("character"));
-    }
-
-    #[test]
-    fn parse_mcp_expect() {
-        let path = write_expect(
-            "bt-uat-test-mcp-ok",
-            "surface = \"mcp\"\ntool = \"evaluate\"\ncode = \"1 + 1\"\nresponse_contains = \"2\"\n",
-        );
-        let e = parse_expect_toml(&path).unwrap();
-        assert_eq!(e.surface, Surface::Mcp);
-        assert_eq!(e.tool.as_deref(), Some("evaluate"));
-        assert_eq!(e.code.as_deref(), Some("1 + 1"));
-        assert_eq!(e.response_contains.as_deref(), Some("2"));
-    }
-
-    #[test]
-    fn parse_expect_toml_rejects_mcp_without_tool() {
-        let path = write_expect(
-            "bt-uat-test-mcp-no-tool",
-            "surface = \"mcp\"\nresponse_contains = \"2\"\n",
-        );
-        assert!(parse_expect_toml(&path).unwrap_err().contains("tool"));
-    }
-
-    #[test]
-    fn parse_expect_toml_rejects_mcp_code_and_arguments() {
-        let path = write_expect(
-            "bt-uat-test-mcp-both",
-            "surface = \"mcp\"\ntool = \"evaluate\"\ncode = \"1\"\narguments = \"{}\"\nresponse_contains = \"x\"\n",
-        );
-        let err = parse_expect_toml(&path).unwrap_err();
-        assert!(err.contains("code") && err.contains("arguments"));
     }
 
     #[test]

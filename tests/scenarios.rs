@@ -22,6 +22,28 @@ fn projects_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projects")
 }
 
+/// Every `expect.toml` in `projects/` parses and discovery is well-formed
+/// (unique names, ≥1 step each). Runs offline — no network or Erlang — so a
+/// malformed scenario file is caught on any CI leg, not just the e2e ones.
+#[test]
+fn all_scenarios_discover() {
+    let scenarios = scenario::discover(&projects_dir()).expect("failed to discover scenarios");
+    assert!(!scenarios.is_empty(), "no scenarios discovered");
+    for s in &scenarios {
+        assert!(!s.steps.is_empty(), "scenario `{}` has no steps", s.name);
+    }
+    // The consolidated LSP fixture fans out into one scenario per capability.
+    let lsp: Vec<&str> = scenarios
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| n.starts_with("lsp/"))
+        .collect();
+    assert!(
+        lsp.contains(&"lsp/hover") && lsp.contains(&"lsp/document_symbol"),
+        "expected fanned-out lsp scenarios, got {lsp:?}"
+    );
+}
+
 #[test]
 #[ignore = "requires network + Erlang/OTP; run via `just uat`"]
 fn all_scenarios_pass() {
@@ -36,22 +58,31 @@ fn all_scenarios_pass() {
 
     println!("\n--- UAT scenarios ({}) ---", scenarios.len());
     for s in &scenarios {
-        // Show the most relevant detail per surface: entrypoint for `run`, args
-        // for `cli`, the request method for `lsp`, the tool for `mcp`, nothing
-        // extra for `bunit`.
+        // Show the most relevant detail from the first step: entrypoint for
+        // `run`, args for `cli`, the request method for `lsp`, the tool for
+        // `mcp`, nothing extra for `bunit`. Stepped scenarios note their length.
         let detail = s
-            .expect
-            .entrypoint
-            .as_deref()
-            .or(s.expect.args.as_deref())
-            .or(s.expect.lsp_method.as_deref())
-            .or(s.expect.tool.as_deref())
+            .steps
+            .first()
+            .and_then(|step| {
+                step.entrypoint
+                    .as_deref()
+                    .or(step.args.as_deref())
+                    .or(step.lsp_method.as_deref())
+                    .or(step.tool.as_deref())
+            })
             .unwrap_or("-");
+        let steps = if s.steps.len() > 1 {
+            format!(" [{} steps]", s.steps.len())
+        } else {
+            String::new()
+        };
         println!(
-            "  {:24} surface={:5} {}",
+            "  {:24} surface={:5} {}{}",
             s.name,
-            format!("{:?}", s.expect.surface),
-            detail
+            format!("{:?}", s.surface),
+            detail,
+            steps
         );
     }
     println!();

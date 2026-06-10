@@ -1,0 +1,42 @@
+# LSP scenarios (BT-2480 fan-out): one fixture package, one [[scenario]] per
+# editor capability. The server runs standalone in AST mode (no build, no BEAM),
+# so each scenario opens its own source file, sends one request, and asserts a
+# value substring of the response — green on every platform leg.
+#
+# Display names are `lsp/hover`, `lsp/completion`, etc. This collapses what used
+# to be four separate `beamtalk new` packages (lsp_hover, lsp_completion,
+# lsp_definition, lsp_document_symbol) into a single fixture.
+
+[[scenario]]
+name = "hover"
+surface = "lsp"
+method = "textDocument/hover"
+source = "src/LspHover.bt"
+line = 4
+character = 18
+response_contains = "Extends:"
+
+[[scenario]]
+name = "completion"
+surface = "lsp"
+method = "textDocument/completion"
+source = "src/LspCompletion.bt"
+line = 10
+character = 18
+response_contains = "\"self\""
+
+[[scenario]]
+name = "definition"
+surface = "lsp"
+method = "textDocument/definition"
+source = "src/LspDefinition.bt"
+line = 4
+character = 18
+response_contains = "LspDefinition.bt"
+
+[[scenario]]
+name = "document_symbol"
+surface = "lsp"
+method = "textDocument/documentSymbol"
+source = "src/LspDocumentSymbol.bt"
+response_contains = "increment:"
