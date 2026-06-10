@@ -331,6 +331,18 @@ fn parse_expect_text(
 /// Validate one step's fields against its surface. `multi` is true when the step
 /// is part of a multi-step sequence (which relaxes some single-step requirements).
 fn validate_step(surface: Surface, step: &Step, multi: bool) -> Result<(), String> {
+    // Reject fields that belong to a different surface — they'd be silently
+    // ignored at runtime, quietly weakening the scenario. `expect.toml` fields
+    // are surface-specific, so a stray key is an authoring error.
+    let stray = unexpected_fields(surface, step);
+    if !stray.is_empty() {
+        return Err(format!(
+            "`{}` surface does not use field(s): {}",
+            surface_name(surface),
+            stray.join(", ")
+        ));
+    }
+
     match surface {
         Surface::Bunit => {}
         Surface::Run => {
@@ -353,7 +365,9 @@ fn validate_step(surface: Surface, step: &Step, multi: bool) -> Result<(), Strin
             if step.source.is_none() {
                 return Err("`lsp` requires a `source` key".to_string());
             }
-            if step.response_contains.is_none() {
+            // A lone step must assert something; in a sequence a side-effect
+            // step may omit `response_contains` (it only needs to not error).
+            if !multi && step.response_contains.is_none() {
                 return Err("`lsp` requires a `response_contains` key".to_string());
             }
             if lsp_needs_position(method) && (step.line.is_none() || step.character.is_none()) {
@@ -377,6 +391,59 @@ fn validate_step(surface: Surface, step: &Step, multi: bool) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+/// The `expect.toml` field names set on `step` that do not belong to `surface`.
+/// Keyed by the TOML field name so error messages match what the author wrote.
+fn unexpected_fields(surface: Surface, step: &Step) -> Vec<&'static str> {
+    let present: [(&str, bool); 16] = [
+        ("entrypoint", step.entrypoint.is_some()),
+        ("args", step.args.is_some()),
+        ("setup", step.setup.is_some()),
+        ("cwd", step.cwd.is_some()),
+        ("stdout", step.stdout.is_some()),
+        ("stdout_contains", step.stdout_contains.is_some()),
+        ("stderr_contains", step.stderr_contains.is_some()),
+        ("exit_code", step.exit_code.is_some()),
+        ("method", step.lsp_method.is_some()),
+        ("source", step.source.is_some()),
+        ("line", step.line.is_some()),
+        ("character", step.character.is_some()),
+        ("response_contains", step.response_contains.is_some()),
+        ("tool", step.tool.is_some()),
+        ("code", step.code.is_some()),
+        ("arguments", step.arguments.is_some()),
+    ];
+    let allowed: &[&str] = match surface {
+        Surface::Bunit => &[],
+        Surface::Run => &["entrypoint", "stdout", "exit_code"],
+        Surface::Cli => &[
+            "args",
+            "setup",
+            "cwd",
+            "stdout_contains",
+            "stderr_contains",
+            "exit_code",
+        ],
+        Surface::Lsp => &["method", "source", "line", "character", "response_contains"],
+        Surface::Mcp => &["tool", "code", "arguments", "response_contains"],
+    };
+    present
+        .into_iter()
+        .filter(|(name, set)| *set && !allowed.contains(name))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Lowercase surface name as written in `expect.toml`.
+fn surface_name(surface: Surface) -> &'static str {
+    match surface {
+        Surface::Bunit => "bunit",
+        Surface::Run => "run",
+        Surface::Cli => "cli",
+        Surface::Lsp => "lsp",
+        Surface::Mcp => "mcp",
+    }
 }
 
 /// Whether an LSP method takes a `position` (cursor) in its params. Outline /
@@ -644,7 +711,8 @@ fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
 
     for (i, step) in scenario.steps.iter().enumerate() {
         let method = step.lsp_method.as_deref().unwrap();
-        let needle = step.response_contains.as_deref().unwrap();
+        // Optional in a sequence: a side-effect step need only not error.
+        let needle = step.response_contains.as_deref();
         let label = step_label(scenario, i, &format!("`{method}`"));
 
         let src_rel = step.source.as_deref().unwrap();
@@ -680,11 +748,13 @@ fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
                 scenario.name
             ));
         }
-        if !response.contains(needle) {
-            return Err(format!(
-                "scenario `{}` {label}: response missing expected substring {needle:?}\n--- response ---\n{response}",
-                scenario.name
-            ));
+        if let Some(needle) = needle {
+            if !response.contains(needle) {
+                return Err(format!(
+                    "scenario `{}` {label}: response missing expected substring {needle:?}\n--- response ---\n{response}",
+                    scenario.name
+                ));
+            }
         }
     }
     Ok(())
@@ -1156,6 +1226,36 @@ response_contains = "2"
 "#;
         let err = parse_expect_text(text, "d", Path::new("/x")).unwrap_err();
         assert!(err.contains("not both"));
+    }
+
+    #[test]
+    fn rejects_field_from_another_surface() {
+        // A `cli` scenario carrying a `run`/`mcp` field would silently ignore
+        // it at runtime — reject at parse instead.
+        let err = parse_one("surface = \"cli\"\nargs = \"--help\"\nstdout = \"ok\"\n").unwrap_err();
+        assert!(err.contains("does not use") && err.contains("stdout"));
+
+        let err = parse_one("surface = \"bunit\"\ntool = \"evaluate\"\n").unwrap_err();
+        assert!(err.contains("tool"));
+    }
+
+    #[test]
+    fn lsp_sequence_allows_side_effect_step_without_assertion() {
+        let text = r#"
+[[scenario]]
+name = "seq"
+surface = "lsp"
+[[scenario.step]]
+method = "textDocument/documentSymbol"
+source = "src/Foo.bt"
+[[scenario.step]]
+method = "textDocument/documentSymbol"
+source = "src/Foo.bt"
+response_contains = "increment:"
+"#;
+        let scns = parse_expect_text(text, "lsp", Path::new("/x")).unwrap();
+        assert_eq!(scns[0].steps.len(), 2);
+        assert_eq!(scns[0].steps[0].response_contains, None);
     }
 
     #[test]
