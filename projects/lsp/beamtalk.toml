@@ -1,5 +1,5 @@
 [package]
-name = "lsp_completion"
+name = "lsp"
 version = "0.1.0"
 
 [dependencies]

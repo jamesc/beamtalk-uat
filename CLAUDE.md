@@ -90,7 +90,8 @@ Example: BT-2476 (`beamtalk new` scaffolds a project that fails its own
   capabilities (`documentSymbol`, `hover`, `completion`, `definition`, …) and go
   green on **every** platform leg, not just the ones with Erlang. Assert on value
   substrings (`"self"`, `Extends:`, a filename) that don't depend on the server's
-  JSON key spacing. One scenario per capability (`projects/lsp_*`).
+  JSON key spacing. The capabilities share one fixture, `projects/lsp/`, fanned
+  out with a `[[scenario]]` per capability (BT-2480).
 * **MCP (`surface = "mcp"`)** — drives the bundled `beamtalk-mcp` server over
   stdio JSON-RPC (`src/mcp.rs`; **newline-delimited**, unlike LSP's
   `Content-Length`), calls one tool, and asserts a **substring** of the result.
@@ -122,8 +123,13 @@ what `ci.yml`'s per-PR e2e gate installs once it exists.
 * Erlang/OTP on PATH — `beamtalk build`/`run` need a BEAM runtime.
 * `tar` (Unix) / `unzip` (Windows) — archive extraction.
 
-The harness is intentionally **dependency-free** (std + subprocess only) so it
-builds offline and can't drift from the toolchain it tests.
+The harness keeps its **transport dependency-free** (std + subprocess only): the
+MCP/LSP stdio clients (`src/mcp.rs`, `src/lsp.rs`) are hand-rolled on purpose, so
+a generic JSON-RPC crate can't paper over a framing bug in the toolchain under
+test. The one sanctioned exception is **config parsing** — `expect.toml` files
+are our own data, not the artifact under test — so scenario parsing uses `toml` +
+`serde` (which is what makes the `[[scenario]]` / `[[step]]` tables below
+possible). Don't re-litigate this; see BT-2480.
 
 ## Adding a scenario
 
@@ -174,7 +180,8 @@ directory that contains an `expect.toml`. No per-scenario Rust test code needed.
    The harness opens `source`, sends `method`, and substring-checks the
    response. `documentSymbol` / `formatting` need no `line`/`character`; the
    others do. Assert on value substrings that don't depend on JSON key spacing.
-   Name LSP scenarios `lsp_<capability>`, one per capability.
+   Prefer the shared `projects/lsp/` fixture and add a `[[scenario]]` per
+   capability (see below) rather than a new `lsp_*` package.
 
    **MCP scenario** (call a `beamtalk-mcp` tool against a live workspace):
    ```toml
@@ -187,5 +194,46 @@ directory that contains an `expect.toml`. No per-scenario Rust test code needed.
    `--start` boots a `beamtalk repl` workspace from the staged project, so the
    project must compile and these need BEAM (CI legs). Name MCP scenarios
    `mcp_<tool-or-behaviour>`, one per tool/behaviour.
+
+   **Multiple scenarios per fixture** (`[[scenario]]`, BT-2480) — when several
+   assertions share one package's source, list them instead of scaffolding a
+   package each. Display names become `<dir>/<name>` (e.g. `lsp/hover`):
+   ```toml
+   [[scenario]]
+   name = "hover"
+   surface = "lsp"
+   method = "textDocument/hover"
+   source = "src/Counter.bt"
+   line = 4
+   character = 18
+   response_contains = "Extends:"
+
+   [[scenario]]
+   name = "document_symbol"
+   surface = "lsp"
+   method = "textDocument/documentSymbol"
+   source = "src/Counter.bt"
+   response_contains = "increment:"
+   ```
+   Fixtures that need *different source* (e.g. lint-clean vs lint-detects) stay
+   separate packages — that's not sprawl.
+
+   **Multi-step scenario** (`[[step]]`, BT-2480) — an ordered sequence against
+   **one live session**, so a later step observes an earlier step's side effect.
+   Only valid on session-backed surfaces (`lsp`, `mcp`); rejected on
+   `cli`/`run`/`bunit` (fresh process per step, no shared state). A step's
+   `response_contains` is optional in a sequence — a side-effect step need only
+   not error. Failures report the step index (`step 2/3`).
+   ```toml
+   surface = "mcp"            # one workspace for the whole sequence
+   [[step]]
+   tool = "evaluate"
+   code = "Counter spawn"     # side effect: create an actor
+   [[step]]
+   tool = "workspace_actors"  # observe it
+   response_contains = "Counter"
+   ```
+   Combine both forms with `[[scenario.step]]` (a stepped scenario inside a
+   fanned-out file).
 
 4. Done — `just uat` picks it up automatically via `tests/scenarios.rs`.

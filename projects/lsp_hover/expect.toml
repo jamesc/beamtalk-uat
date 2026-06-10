@@ -1,8 +1,0 @@
-# LSP scenario: textDocument/hover on a class name returns its doc/hierarchy.
-# Cursor (0-based) sits on the class name in `Object subclass: LspHover`.
-surface = "lsp"
-method = "textDocument/hover"
-source = "src/LspHover.bt"
-line = 4
-character = 18
-response_contains = "Extends:"

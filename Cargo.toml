@@ -9,10 +9,17 @@ description = "Acceptance-gate harness: installs a released Beamtalk toolchain b
 license = "Apache-2.0"
 publish = false
 
-# Deliberately dependency-free: the harness orchestrates the *released* `beamtalk`
-# binary plus standard tools (`gh`, `tar`) via std::process. No HTTP/JSON crates,
-# so the harness builds offline and never drifts from the toolchain under test.
+# The harness orchestrates the *released* `beamtalk` binary plus standard tools
+# (`gh`, `tar`) via std::process, and hand-rolls the MCP/LSP stdio clients
+# (`src/mcp.rs`, `src/lsp.rs`) — that transport stays dependency-free on purpose,
+# so a generic JSON-RPC crate can't paper over a framing bug in the toolchain
+# under test. The one sanctioned exception is *config parsing*: `expect.toml`
+# scenario files are our own data, not the artifact under test, so we use `toml`
+# + `serde` there (it unlocks the nested `[[scenario]]` / `[[step]]` tables the
+# old hand-rolled flat parser couldn't express). See BT-2480.
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 
 [lib]
 path = "src/lib.rs"
