@@ -203,8 +203,11 @@ struct RawScenario {
     step: Vec<Step>,
 }
 
-/// The `[[scenario]]` (fan-out) form of an `expect.toml`.
+/// The `[[scenario]]` (fan-out) form of an `expect.toml`. `deny_unknown_fields`
+/// rejects a file that mixes top-level flat fields (e.g. `surface = …`) with a
+/// `[[scenario]]` array — otherwise the flat scenario would be silently dropped.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScenarioFile {
     scenario: Vec<RawScenario>,
 }
@@ -634,6 +637,11 @@ fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
     let root_uri = path_to_uri(project);
     client.initialize(&root_uri)?;
 
+    // A document is opened at most once per session: `did_open` always sends
+    // `version: 1`, so re-opening an already-open URI across steps is a protocol
+    // violation. Steps that revisit the same source just reuse the open doc.
+    let mut opened = std::collections::HashSet::new();
+
     for (i, step) in scenario.steps.iter().enumerate() {
         let method = step.lsp_method.as_deref().unwrap();
         let needle = step.response_contains.as_deref().unwrap();
@@ -645,7 +653,9 @@ fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
             .map_err(|err| format!("read source {}: {err}", src_path.display()))?;
         let abs = src_path.canonicalize().unwrap_or_else(|_| src_path.clone());
         let uri = path_to_uri(&abs);
-        client.did_open(&uri, &text)?;
+        if opened.insert(uri.clone()) {
+            client.did_open(&uri, &text)?;
+        }
 
         // Build params: every request targets the open document; position-based
         // ones add a cursor; formatting needs FormattingOptions.
@@ -1146,6 +1156,26 @@ response_contains = "2"
 "#;
         let err = parse_expect_text(text, "d", Path::new("/x")).unwrap_err();
         assert!(err.contains("not both"));
+    }
+
+    #[test]
+    fn rejects_flat_fields_mixed_with_scenario_array() {
+        // A file with both top-level flat fields and a `[[scenario]]` array
+        // must error, not silently drop the flat scenario.
+        let text = r#"
+surface = "mcp"
+tool = "evaluate"
+code = "1"
+response_contains = "1"
+
+[[scenario]]
+name = "other"
+surface = "mcp"
+tool = "evaluate"
+code = "2"
+response_contains = "2"
+"#;
+        assert!(parse_expect_text(text, "d", Path::new("/x")).is_err());
     }
 
     #[test]
