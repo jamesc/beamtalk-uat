@@ -676,10 +676,15 @@ pub fn run(tc: &Toolchain, scenario: &Scenario) -> Outcome {
 }
 
 fn run_inner(tc: &Toolchain, scenario: &Scenario) -> Result<(), String> {
+    // `Scenario` is public with public fields, so a caller could hand us a
+    // vector the parser would never produce. Re-check the step invariants here
+    // rather than indexing `steps[0]` blind (panic) or iterating zero steps on a
+    // session surface (vacuous green) — the worst failure mode for this gate.
+    check_step_invariants(scenario)?;
+
     let staged = crate::stage_project(&scenario.dir_name);
     let path = staged.path();
 
-    // Non-session surfaces always have exactly one step (enforced at parse).
     match scenario.surface {
         Surface::Bunit => run_bunit(tc, path, &scenario.name),
         Surface::Run => run_entrypoint(tc, path, scenario, &scenario.steps[0]),
@@ -687,6 +692,25 @@ fn run_inner(tc: &Toolchain, scenario: &Scenario) -> Result<(), String> {
         Surface::Lsp => run_lsp(tc, path, scenario),
         Surface::Mcp => run_mcp(tc, path, scenario),
     }
+}
+
+/// Guard the step-count invariants `run_inner` relies on: every scenario has at
+/// least one step, and a non-session surface (`bunit`/`run`/`cli`) has exactly
+/// one. Discovery already enforces these, but the public `Scenario` API can't,
+/// so they are re-checked before dispatch.
+fn check_step_invariants(scenario: &Scenario) -> Result<(), String> {
+    if scenario.steps.is_empty() {
+        return Err(format!("scenario `{}` has no steps", scenario.name));
+    }
+    if !scenario.surface.is_session_backed() && scenario.steps.len() != 1 {
+        return Err(format!(
+            "scenario `{}`: `{}` surface expects exactly one step, got {}",
+            scenario.name,
+            surface_name(scenario.surface),
+            scenario.steps.len()
+        ));
+    }
+    Ok(())
 }
 
 /// Label a step for failure messages: bare `(detail)` for a single-step
@@ -1431,6 +1455,43 @@ args = "lint"
 "#;
         let err = parse_expect_text(text, "d", Path::new("/x")).unwrap_err();
         assert!(err.contains("unknown top-level key") && err.contains("bogus"));
+    }
+
+    fn scenario_with_steps(surface: Surface, steps: Vec<Step>) -> Scenario {
+        Scenario {
+            name: "s".to_string(),
+            dir_name: "s".to_string(),
+            project_dir: PathBuf::from("/x"),
+            surface,
+            steps,
+        }
+    }
+
+    #[test]
+    fn rejects_scenario_with_no_steps() {
+        let s = scenario_with_steps(Surface::Cli, vec![]);
+        let err = check_step_invariants(&s).unwrap_err();
+        assert!(err.contains("no steps"));
+    }
+
+    #[test]
+    fn rejects_multi_step_on_non_session_surface() {
+        let s = scenario_with_steps(Surface::Cli, vec![Step::default(), Step::default()]);
+        let err = check_step_invariants(&s).unwrap_err();
+        assert!(err.contains("exactly one step"));
+    }
+
+    #[test]
+    fn accepts_single_step_and_session_sequences() {
+        assert!(
+            check_step_invariants(&scenario_with_steps(Surface::Cli, vec![Step::default()]))
+                .is_ok()
+        );
+        assert!(check_step_invariants(&scenario_with_steps(
+            Surface::Mcp,
+            vec![Step::default(), Step::default()]
+        ))
+        .is_ok());
     }
 
     #[test]
