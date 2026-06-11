@@ -14,7 +14,7 @@
 #   * e2e   — installs Erlang/OTP and runs the full #[ignore]d scenario suite
 #     against the EDGE bundle (one Linux leg; the cross-platform matrix lives in
 #     uat.yml). If the rolling `edge` pre-release isn't published yet the harness
-#     skips this leg cleanly rather than reding the gate (BT-2497).
+#     skips this leg cleanly rather than failing the gate (BT-2497).
 #     Edge — not latest — because the harness is developed against the
 #     toolchain tip: edge is the rolling Linux pre-release beamtalk republishes
 #     on every merge to main (edge.yml), so it always carries features that have
