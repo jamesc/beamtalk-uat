@@ -28,7 +28,10 @@ fn combined(out: &std::process::Output) -> String {
 #[test]
 #[ignore = "requires network + Erlang/OTP; run via `just uat`"]
 fn toolchain_reports_version() {
-    let tc = shared();
+    let Some(tc) = shared() else {
+        eprintln!("skipped: requested rolling release is not available yet");
+        return;
+    };
     assert!(
         !tc.version.is_empty(),
         "`beamtalk --version` produced no output"
@@ -48,7 +51,10 @@ fn toolchain_reports_version() {
 #[test]
 #[ignore = "requires network + Erlang/OTP; run via `just uat`"]
 fn smoke_build_and_test() {
-    let tc = shared();
+    let Some(tc) = shared() else {
+        eprintln!("skipped: requested rolling release is not available yet");
+        return;
+    };
     let project = stage_project("smoke");
 
     let out = tc

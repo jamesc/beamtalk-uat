@@ -88,6 +88,54 @@ impl VersionSpec {
             VersionSpec::Exact(v) => format!("v{v}"),
         }
     }
+
+    /// Whether an *absent* release for this spec is an expected "not built yet"
+    /// state rather than a contract violation.
+    ///
+    /// `nightly` and `edge` are rolling pre-releases produced by scheduled /
+    /// on-merge workflows that may simply not have run yet (e.g. `edge` before
+    /// `beamtalk`'s `edge.yml` is wired up — BT-2497). A missing one should
+    /// *skip* the leg, not red the gate. `latest` (newest stable) and `Exact`
+    /// (pinned) must exist — a 404 there is a genuine, loud failure.
+    fn tolerates_missing_release(&self) -> bool {
+        matches!(self, VersionSpec::Nightly | VersionSpec::Edge)
+    }
+}
+
+/// Why a toolchain install failed — distinguishes a *missing release* (a `gh
+/// release download` 404) from every other failure so the caller can skip a
+/// rolling pre-release that isn't published yet while still failing loudly on a
+/// missing pinned version or a real error (network, extraction, layout).
+#[derive(Debug, Clone)]
+pub enum InstallError {
+    /// The requested release/tag isn't published (a 404 from `gh`).
+    ReleaseMissing(String),
+    /// Any other install failure (network, spawn, extraction, layout, …).
+    Other(String),
+}
+
+impl std::fmt::Display for InstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InstallError::ReleaseMissing(m) | InstallError::Other(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for InstallError {}
+
+impl From<String> for InstallError {
+    fn from(m: String) -> Self {
+        InstallError::Other(m)
+    }
+}
+
+/// Does this `gh release download` stderr indicate the release/tag simply
+/// doesn't exist (a 404), as opposed to an auth/network/other error? Kept pure
+/// so it's covered by the hermetic `cargo test --lib` leg (no network).
+fn is_release_missing(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("release not found") || s.contains("404")
 }
 
 /// An installed Beamtalk toolchain ready to drive scenarios.
@@ -136,15 +184,15 @@ fn repo_root() -> PathBuf {
 /// Honours `BEAMTALK_UAT_BIN` as an escape hatch. Otherwise downloads the
 /// matching release asset into `.beamtalk-uat/<version>/` and extracts it so
 /// `beamtalk` finds its bundled runtime via the standard installed layout.
-pub fn install(spec: &VersionSpec) -> Result<Toolchain, String> {
+pub fn install(spec: &VersionSpec) -> Result<Toolchain, InstallError> {
     // Escape hatch: use an already-installed binary as-is.
     if let Ok(bin) = std::env::var("BEAMTALK_UAT_BIN") {
         let bin = PathBuf::from(bin);
         if !bin.exists() {
-            return Err(format!(
+            return Err(InstallError::Other(format!(
                 "BEAMTALK_UAT_BIN does not exist: {}",
                 bin.display()
-            ));
+            )));
         }
         let version = query_version(&bin)?;
         return Ok(Toolchain { bin, version });
@@ -163,10 +211,10 @@ pub fn install(spec: &VersionSpec) -> Result<Toolchain, String> {
         download_and_extract(spec, &prefix)?;
     }
     if !bin.exists() {
-        return Err(format!(
+        return Err(InstallError::Other(format!(
             "toolchain install did not produce {} — archive layout may have changed",
             bin.display()
-        ));
+        )));
     }
 
     let version = query_version(&bin)?;
@@ -177,12 +225,30 @@ pub fn install(spec: &VersionSpec) -> Result<Toolchain, String> {
 ///
 /// Scenarios call this so the (possibly slow) install happens a single time and
 /// the bundle is reused across every test in the run.
-pub fn shared() -> &'static Toolchain {
-    static SHARED: OnceLock<Toolchain> = OnceLock::new();
-    SHARED.get_or_init(|| {
-        let spec = VersionSpec::from_env();
-        install(&spec).unwrap_or_else(|e| panic!("failed to install Beamtalk toolchain: {e}"))
-    })
+///
+/// Returns `None` when the requested release is a *rolling pre-release*
+/// (`nightly` / `edge`) that isn't published yet — a "not built yet"
+/// precondition, not a regression, so callers should **skip** rather than fail
+/// (BT-2497). Every other failure — a missing *pinned* version, a missing
+/// `latest`, or a real install error — still panics loudly.
+pub fn shared() -> Option<&'static Toolchain> {
+    static SHARED: OnceLock<Option<Toolchain>> = OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let spec = VersionSpec::from_env();
+            match install(&spec) {
+                Ok(tc) => Some(tc),
+                Err(InstallError::ReleaseMissing(msg)) if spec.tolerates_missing_release() => {
+                    eprintln!(
+                        "note: skipping UAT — rolling release `{}` is not published yet ({msg})",
+                        spec.cache_key()
+                    );
+                    None
+                }
+                Err(e) => panic!("failed to install Beamtalk toolchain: {e}"),
+            }
+        })
+        .as_ref()
 }
 
 /// If an explicit version was requested via env, return it (without leading `v`).
@@ -209,15 +275,15 @@ fn query_version(bin: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn download_and_extract(spec: &VersionSpec, prefix: &Path) -> Result<(), String> {
+fn download_and_extract(spec: &VersionSpec, prefix: &Path) -> Result<(), InstallError> {
     // `edge` is published Linux-only (beamtalk's edge.yml builds just
     // linux-x86_64); fail fast with a clear message rather than a generic
     // "no asset downloaded" when requested on another platform.
     if matches!(spec, VersionSpec::Edge) && std::env::consts::OS != "linux" {
-        return Err(format!(
+        return Err(InstallError::Other(format!(
             "the `edge` pre-release is Linux-only; on {} use `latest`, `nightly`, or an explicit version",
             std::env::consts::OS
-        ));
+        )));
     }
 
     let (plat, ext) = platform()?;
@@ -245,14 +311,27 @@ fn download_and_extract(spec: &VersionSpec, prefix: &Path) -> Result<(), String>
         .args(["--dir", &tmp.to_string_lossy()])
         .arg("--clobber");
 
-    let status = cmd
-        .status()
-        .map_err(|e| format!("failed to spawn `gh release download` (is `gh` installed?): {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "`gh release download` for {} failed ({status})",
-            spec.cache_key()
-        ));
+    // Capture stderr so we can classify a missing-release 404 (skippable for a
+    // rolling pre-release) apart from a real error, then echo it through so the
+    // failure is still visible under `--nocapture`.
+    let out = cmd.output().map_err(|e| {
+        InstallError::Other(format!(
+            "failed to spawn `gh release download` (is `gh` installed?): {e}"
+        ))
+    })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        eprint!("{stderr}");
+        let msg = format!(
+            "`gh release download` for {} failed ({})",
+            spec.cache_key(),
+            out.status
+        );
+        return Err(if is_release_missing(&stderr) {
+            InstallError::ReleaseMissing(msg)
+        } else {
+            InstallError::Other(msg)
+        });
     }
 
     let archive = find_archive(&tmp, ext)?;
@@ -483,5 +562,32 @@ mod tests {
             VersionSpec::Exact("0.4.0".into()).tag(),
             Some("v0.4.0".into())
         );
+    }
+
+    #[test]
+    fn only_rolling_prereleases_tolerate_a_missing_release() {
+        // Rolling pre-releases may simply not be built yet — skippable.
+        assert!(VersionSpec::Nightly.tolerates_missing_release());
+        assert!(VersionSpec::Edge.tolerates_missing_release());
+        // A pinned version or `latest` must exist — a 404 there is a real failure.
+        assert!(!VersionSpec::Latest.tolerates_missing_release());
+        assert!(!VersionSpec::Exact("0.4.0".into()).tolerates_missing_release());
+    }
+
+    #[test]
+    fn classifies_gh_missing_release_stderr() {
+        // The two shapes `gh release download` emits for an absent tag.
+        assert!(is_release_missing("release not found"));
+        assert!(is_release_missing(
+            "HTTP 404: Not Found (https://api.github.com/...)"
+        ));
+        // Case-insensitive.
+        assert!(is_release_missing("Release Not Found"));
+        // Auth / network errors are *not* a missing release — must fail loudly.
+        assert!(!is_release_missing(
+            "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable"
+        ));
+        assert!(!is_release_missing("error connecting to api.github.com"));
+        assert!(!is_release_missing(""));
     }
 }

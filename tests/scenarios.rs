@@ -47,7 +47,12 @@ fn all_scenarios_discover() {
 #[test]
 #[ignore = "requires network + Erlang/OTP; run via `just uat`"]
 fn all_scenarios_pass() {
-    let tc = shared();
+    let Some(tc) = shared() else {
+        // Rolling pre-release (edge/nightly) not published yet — skip cleanly
+        // rather than red the gate (BT-2497).
+        eprintln!("skipped: requested rolling release is not available yet");
+        return;
+    };
     let scenarios = scenario::discover(&projects_dir()).expect("failed to discover scenarios");
 
     assert!(
