@@ -115,7 +115,10 @@ Selection env vars: `BEAMTALK_UAT_VERSION` (`latest`/`nightly`/`edge`/`vX.Y.Z`)
 and `BEAMTALK_UAT_BIN` (skip download, use this binary). `edge` is a rolling
 Linux-only pre-release that beamtalk republishes on every merge to `main`
 (`edge.yml`), so it tracks the toolchain tip with no nightly-cadence lag — it is
-what `ci.yml`'s per-PR e2e gate installs once it exists.
+what `ci.yml`'s per-PR e2e gate installs. If a rolling pre-release
+(`edge`/`nightly`) isn't published yet, the harness **skips** the leg cleanly
+rather than failing it (BT-2497); a missing *pinned* version (`vX.Y.Z`) or
+`latest` still fails loudly.
 
 ## Requirements
 
