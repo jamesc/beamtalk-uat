@@ -143,10 +143,13 @@ scenario per tool/behaviour (`projects/mcp_*`).
 - `gh` (authenticated), Erlang/OTP on PATH, and `cargo` + `just`.
 
 In a fresh cloud session (Claude Code on the web), run `scripts/setup-cloud.sh`
-to install the missing pieces — it provisions **Erlang/OTP 27** and **just**
-(Rust/cargo, `gh`, `tar`/`unzip` are assumed present) and skips anything already
-installed. A `SessionStart` hook (`.claude/settings.json`) runs it automatically
-on the first session, guarded by a marker file. The script deliberately installs
+to install the missing pieces — it provisions **Erlang/OTP** (pinned by
+`.tool-versions`, installed via `mise` — the same mechanism CI's `setup-beam`
+and the beamtalk repo use, so the OTP version never drifts from what the
+released bundle is built against) and **just** (Rust/cargo, `gh`, `tar`/`unzip`
+are assumed present) and skips anything already installed. A `SessionStart`
+hook (`.claude/settings.json`) runs it automatically on the first session,
+guarded by a marker file. The script deliberately installs
 no Elixir/Mix toolchain: the LiveView IDE isn't part of the released bundle UAT
 drives, and the gate-consistent way to test it later is a self-contained
 `mix release` OTP tarball that needs no host Elixir.

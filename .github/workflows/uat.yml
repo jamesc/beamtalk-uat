@@ -124,11 +124,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # OTP/rebar3 versions come from .tool-versions (the single source of truth,
+      # mirroring jamesc/beamtalk) — never hardcoded here, so every matrix leg
+      # tracks the toolchain the released bundle is built against.
       - name: Install Erlang/OTP
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1
         with:
-          otp-version: '27.0'
-          rebar3-version: '3.27'
+          version-file: .tool-versions
+          version-type: strict
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache Rust dependencies
