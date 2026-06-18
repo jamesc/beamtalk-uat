@@ -886,7 +886,13 @@ fn run_lsp(tc: &Toolchain, project: &Path, scenario: &Scenario) -> Result<(), St
 /// Build a `file://` URI from an absolute path (Unix; Windows adds the leading
 /// slash and forward slashes the separators).
 fn path_to_uri(path: &Path) -> String {
-    let s = path.to_string_lossy().replace('\\', "/");
+    let slashed = path.to_string_lossy().replace('\\', "/");
+    // Windows `canonicalize()` returns verbatim paths (`\\?\C:\...`). After
+    // forward-slashing, the `//?/` prefix would yield an invalid
+    // `file:////?/C:/...` URI that `beamtalk-lsp` can't open — so every request
+    // comes back `null`. Strip it to emit a clean `file:///C:/...`. (Verbatim
+    // UNC paths `\\?\UNC\...` don't occur for the drive-rooted CI workspace.)
+    let s = slashed.strip_prefix("//?/").unwrap_or(&slashed);
     if s.starts_with('/') {
         format!("file://{s}")
     } else {
@@ -1514,6 +1520,32 @@ args = "lint"
     #[test]
     fn normalize_keeps_non_pids() {
         assert_eq!(normalize("<not a pid>"), "<not a pid>");
+    }
+
+    #[test]
+    fn path_to_uri_builds_file_uris() {
+        // Unix absolute path → triple-slash authority-less file URI.
+        assert_eq!(
+            path_to_uri(Path::new("/home/u/x.bt")),
+            "file:///home/u/x.bt"
+        );
+    }
+
+    #[test]
+    fn path_to_uri_handles_windows_paths() {
+        // A plain Windows drive path forward-slashes into `file:///C:/...`.
+        assert_eq!(
+            path_to_uri(Path::new(r"C:\proj\src\Counter.bt")),
+            "file:///C:/proj/src/Counter.bt"
+        );
+        // A *verbatim* path from Windows `canonicalize()` (`\\?\C:\...`) must
+        // have its `\\?\` prefix stripped, not turned into `file:////?/C:/...`
+        // (which the LSP can't open — the bug behind every `lsp/*` returning
+        // `null` on the windows leg).
+        assert_eq!(
+            path_to_uri(Path::new(r"\\?\C:\proj\src\Counter.bt")),
+            "file:///C:/proj/src/Counter.bt"
+        );
     }
 
     #[test]
