@@ -1,0 +1,22 @@
+# Normalize all text to LF in the working tree on every platform.
+#
+# Without this, Windows checkouts convert text to CRLF (git's autocrlf default
+# on the hosted runners). That breaks the UAT gate two ways against the released
+# toolchain:
+#   * `beamtalk fmt` normalizes source to LF, so a CRLF checkout makes
+#     `beamtalk fmt-check` report every line of an already-formatted fixture as
+#     needing reformatting (cli_fmt_check_clean went red on the windows leg).
+#   * the `lsp` scenarios feed fixture source to `beamtalk-lsp`; CRLF text is not
+#     what the project author committed.
+# Forcing LF keeps the fixtures byte-identical to how they're committed, so the
+# gate tests the toolchain — not git's line-ending rewriting.
+* text=auto eol=lf
+
+# Explicit binaries (none tracked today, but guard against accidental mangling).
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.gz binary
+*.tar binary
