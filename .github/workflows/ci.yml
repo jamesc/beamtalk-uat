@@ -77,7 +77,10 @@ jobs:
 
   e2e:
     name: E2E scenarios vs edge
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: that image moved to ImageOS `ubuntu26`,
+    # which erlef/setup-beam doesn't recognise ("Tried to map a target OS from
+    # env. variable 'ImageOS'"). Same fix as uat.yml's windows-2022 leg.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout
