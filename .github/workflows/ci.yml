@@ -18,9 +18,8 @@
 #     Edge — not latest — because the harness is developed against the
 #     toolchain tip: edge is the rolling Linux pre-release beamtalk republishes
 #     on every merge to main (edge.yml), so it always carries features that have
-#     landed but aren't in a tagged release yet (e.g. foreign cross-class
-#     extension dispatch, BT-2250, which actor_extension needs) with no
-#     nightly-cadence lag. This exercises the drivers end-to-end before merge —
+#     landed but aren't in a tagged release yet, with no nightly-cadence lag.
+#     This exercises the drivers end-to-end before merge —
 #     the only place harness changes meet a real toolchain, since the scenarios
 #     need a BEAM runtime the dev box may lack. The release gate (uat.yml) is
 #     what validates a specific tagged version.
@@ -78,7 +77,10 @@ jobs:
 
   e2e:
     name: E2E scenarios vs edge
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: that image moved to ImageOS `ubuntu26`,
+    # which erlef/setup-beam doesn't recognise ("Tried to map a target OS from
+    # env. variable 'ImageOS'"). Same fix as uat.yml's windows-2022 leg.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout
