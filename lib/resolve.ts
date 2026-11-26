@@ -118,7 +118,7 @@ export type ResolveInput =
   | { kind: 'legacy'; payload: LegacyReleasePayload }
   | { kind: 'selector'; selector: Selector };
 
-const TOOLCHAIN_RE = /^beamtalk-(\d[^/]*)-(linux-x86_64|macos-arm64|macos-x86_64|windows-x86_64)\.(tar\.gz|zip)$/;
+const TOOLCHAIN_RE = /^beamtalk-(?!ide-)([^/]+)-(linux-x86_64|macos-arm64|macos-x86_64|windows-x86_64)\.(tar\.gz|zip)$/;
 
 /** Which target a toolchain archive is for, or null (IDE archives, .vsix, ...). */
 export function toolchainTarget(name: string): TargetName | null {
@@ -240,7 +240,9 @@ async function plan(input: ResolveInput, src: ReleaseSource, scratch: string): P
       expected.set(a.name, await readSidecar(src, tag, a.name, scratch));
     }
   }
-  if (expected.size === 0) throw new Error(`release ${tag} has no toolchain archives`);
+  if (expected.size === 0) {
+    throw new Error(`release ${tag} has no toolchain archives; its assets are: ${listed.map((a) => a.name).join(', ') || '(none)'}`);
+  }
 
   return { source, channel, version, tag, otp: await otpFor(src, channel === 'release' ? tag : 'main'), expected };
 }
