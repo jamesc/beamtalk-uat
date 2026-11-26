@@ -1,142 +1,102 @@
 # beamtalk-uat
 
-Acceptance-test **gate** for [Beamtalk](https://github.com/jamesc/beamtalk).
-
-This repo is a *separate consumer* of Beamtalk: it installs a **released
-toolchain bundle** — the exact artifact a user gets — and runs real Beamtalk
-packages (created with `beamtalk new`) through the toolchain, asserting their
-behaviour. It exists to cover end-to-end, full-project scenarios that the
-in-repo per-file/single-file harnesses can't reach (Linear epic BT-2253). The
-design follows the Swamp gate pattern:
+The external **acceptance gate** for [Beamtalk](https://github.com/jamesc/beamtalk)
+(Linear epic BT-5302, [ADR 0154](https://github.com/jamesc/beamtalk/blob/main/docs/ADR/0154-uat-external-acceptance-gate-for-full-environments.md)).
+It follows the Swamp gate pattern:
 <https://stack72.dev/the-gate-between-our-agent-code-and-our-users/>.
 
-The released bundle is the thing under test — nothing here builds Beamtalk from
-source.
+**The published artifacts are what's under test, never source.** The gate installs
+the release bundle a user installs, with only what a user has (their OS, their
+Erlang/OTP, the public registry), and drives it. See `CLAUDE.md` for the rules.
+
+> **Migration state (BT-5303, Phase 0).** The harness is a TypeScript project on
+> Playwright Test + Zod. The legacy Rust harness (`src/`, `tests/*.rs`, `Cargo.*`,
+> `projects/`, `uat.yml`, the sections marked *legacy* below) stays until BT-5305's
+> J1/J2 and first contracts are green on all four targets against `latest`; the PR
+> that switches `uat.yml` deletes it.
 
 ## Quick start
 
 ```sh
-just uat              # install the latest release and run the suite
-just uat v0.4.0       # pin a specific release
-just uat nightly      # the rolling nightly build
+just install                       # npm ci
+just test                          # the harness's tests of itself (hermetic)
+just uat                           # the gate vs the latest release (needs gh, Erlang/OTP)
+just uat edge                      # ... vs the rolling edge pre-release
+just uat v0.4.0                    # ... vs one release
+just uat-local ~/.beamtalk/bin/beamtalk   # ... vs a binary you already have
 ```
 
-Local development against a binary you already have:
+The version selector is `latest | edge | nightly | vX.Y.Z | local:<path>`
+(`BEAMTALK_UAT_VERSION`). `BEAMTALK_UAT_OTP=<major>` makes the run assert that `erl`
+on `PATH` is that major.
 
-```sh
-just uat-local ~/.beamtalk/bin/beamtalk
+## Layout
+
+| Path | What |
+| --- | --- |
+| `lib/env.ts` | Per-test isolated environment: private `HOME`/`USERPROFILE`, port allocator, unique node names and cookies; strips runner secrets and `BEAMTALK_*`/`RELEASE_*`/`ERL_*` from the child env. |
+| `lib/toolchain.ts` | Installs the toolchain under test from a resolve artifact (re-checking its sha256) or a selector; `local:<path>` uses a binary as-is. |
+| `lib/selector.ts` | The version selector grammar. |
+| `lib/resolve.ts`, `lib/github.ts` | The `resolve` logic (download once, verify, `superseded`) and its GitHub source; `buildMatrix` turns a manifest + `targets.toml` into the workflow matrix. |
+| `lib/otp.ts` | OTP major detection/assertion, and the documented per-target OTP install used by J1 (`documentedInstall`). |
+| `lib/proc.ts` | `run`/`Proc.spawn`, readiness (`waitForOutput`/`waitForPort`), per-step transcripts, hang guards, process-tree kill, process/epmd scans. |
+| `lib/artifacts.ts` | The failure bundle. |
+| `lib/index.ts` | The test API: `test`, `expect`, and the per-test `uat` handle (`uat.bt`, `uat.run`, `uat.spawn`, `uat.step`). |
+| `schemas/` | Zod: the dispatch payloads, the resolve manifest, the installed-toolchain record. |
+| `targets.toml` | Targets, runner images and the per-target OTP legs (owner-gated). |
+| `scripts/resolve.ts` | Entry point of the `resolve` job. `scripts/prepare-toolchain.ts` installs the toolchain before `playwright test`. |
+| `tests/harness/` | Tests **of the harness** (project `harness`): resolver, matrix, selector, proc, env, and a nested run that proves the failure bundle and leak checks. |
+| `tests/smoke/` | A plumbing smoke against the real bundle (project `smoke`). Journeys, contracts and adversarial tests arrive in later phases (ADR § 5). |
+| `.github/workflows/gate.yml` | The gate: `resolve` -> `gate` (target x OTP x shard) -> `result`. |
+
+## How a run works
+
+1. **`resolve`** takes the trigger (a `beamtalk-artifact` payload, a legacy
+   `beamtalk-release` payload, or a selector). It downloads every asset **once**,
+   checks each sha256 (the payload's `assets` map; for the legacy type the published
+   `.sha256` files) and uploads one workflow artifact: `assets/` + `manifest.json`.
+2. A hash that no longer matches means the rolling release (`edge`/`nightly`) was
+   replaced mid-flight. The run ends **`superseded`**: cancelled, nothing filed.
+   A mismatch on a tagged release is a real integrity failure. Concurrency groups
+   cancel the older run for `edge` and `nightly`, never for a release.
+3. **`gate`** runs one job per leg in `targets.toml`: `linux-x86_64`
+   (`ubuntu-24.04`, OTP min and max), `macos-arm64` (`macos-15`, max),
+   `macos-x86_64` (`macos-15-intel`, min), `windows-x86_64` (`windows-2022`, max).
+   The OTP majors come from the dispatch payload (`otp-support.toml`), so a window
+   bump needs no edit here. Each leg installs the bundle from the run's artifact
+   and never touches the release again.
+4. Every test records a **transcript per step**. A red test attaches a **failure
+   bundle**: transcripts, workspace and release logs, `erl_crash.dump`,
+   `epmd -names`, the process tree, `beamtalk --version` and `doctor`, and a one-line
+   repro. **Teardown is checked**: a process or epmd registration left behind is a
+   red step. A step has a hang guard (default 60s) that names the step.
+
+## Writing a test
+
+```ts
+import { expect, test } from '../../lib/index.ts';
+
+test('the bundle reports a version', { tag: '@max-otp' }, async ({ uat }) => {
+  await uat.step('beamtalk --version', async () => {
+    const r = await uat.bt(['--version']);
+    expect(r.code, r.stderr).toBe(0);
+  });
+});
 ```
 
-## How it works
+Stop every long-lived process you `uat.spawn` before the test ends. Tag a test
+`@max-otp` to include it in linux's max-major leg.
 
-1. The harness (`src/lib.rs`) downloads the platform's release asset from
-   `jamesc/beamtalk` via `gh release download`, verifies its checksum, and
-   extracts it to a cached install — once per run, reused across scenarios.
-2. The scenario driver (`src/scenario.rs`, `tests/scenarios.rs`) auto-discovers
-   every `projects/<name>/` directory with an `expect.toml`, stages it to a temp
-   dir, and exercises it through the installed toolchain.
+## Workflow triggers
 
-See `CLAUDE.md` for the assertion surfaces (BUnit vs. the interactive REPL for
-value-returning scenarios) and how to add a scenario.
+`gate.yml` runs on `repository_dispatch` `beamtalk-artifact` (the ADR § 3 payload),
+`repository_dispatch` `beamtalk-release` (legacy `{version, tag}`, accepted until the
+release after Phase 0) and `workflow_dispatch` with a selector. `ci.yml` runs the
+harness self-tests (Linux and Windows) and a smoke against `edge` on every PR.
 
-## Scenario layout
+---
 
-Each scenario is a self-contained Beamtalk project under `projects/<name>/`:
-
-```
-projects/
-  smoke/
-    beamtalk.toml      # standard Beamtalk package manifest
-    expect.toml        # declares the assertion surface + expected outcome
-    src/
-      Smoke.bt         # source under test (multi-file projects are supported)
-    test/
-      SmokeTest.bt     # BUnit assertions (for bunit surface)
-```
-
-### `expect.toml` format
-
-**BUnit surface** — runs `beamtalk test` and asserts all tests pass:
-
-```toml
-surface = "bunit"
-```
-
-**Run surface** — runs `beamtalk run <Class> <selector>` and asserts stdout /
-exit code:
-
-```toml
-surface = "run"
-entrypoint = "MyClass mySelector"
-stdout = "expected output"    # compared after normalization
-exit_code = 0                 # optional, defaults to not checked
-```
-
-At least one of `stdout` or `exit_code` is required for `run` scenarios.
-
-Output normalization trims whitespace, collapses internal runs to single spaces,
-and replaces Erlang PIDs (`<0.123.0>`) with `<pid>` so assertions aren't fragile.
-
-**CLI surface** — runs an arbitrary `beamtalk <args>` subcommand in the staged
-project dir and asserts exit code plus stdout/stderr **substrings**:
-
-```toml
-surface = "cli"
-args = "lint --format json"   # appended to `beamtalk`, whitespace-split
-exit_code = 1                 # optional, defaults to 0 (success)
-stdout_contains = "summary"   # optional substring assertion
-stderr_contains = "redundant" # optional substring assertion
-```
-
-This is the surface for the offline build/tooling commands with no REPL op —
-`new`, `fmt`, `fmt-check`, `lint`, `type-coverage`, `build`, `--help`, … One
-scenario per command/behaviour (`projects/cli_*`). Substring (not exact)
-matching is used because CLI output embeds absolute paths and version strings
-that vary per environment. The staged project is a throwaway temp copy, so
-commands that mutate the tree (`fmt`, `new`) are isolated. Most `cli_*`
-scenarios are Rust-only and run anywhere; `cli_build` needs Erlang/OTP (the CI
-legs), like the `run`/`bunit` surfaces.
-
-**LSP surface** — drives the bundled `beamtalk-lsp` server over stdio JSON-RPC
-(a hand-rolled, dependency-free client in `src/lsp.rs`) and asserts a
-**substring** of one request's response:
-
-```toml
-surface = "lsp"
-method = "textDocument/hover"   # the LSP request to send
-source = "src/LspHover.bt"      # project-relative file to open
-line = 4                        # 0-based cursor (position requests only)
-character = 18                  # 0-based cursor
-response_contains = "Extends:"  # substring asserted in the response
-```
-
-The server runs standalone in its in-process **AST mode** (no workspace, no
-BEAM), so `lsp_*` scenarios cover editor capabilities (`documentSymbol`,
-`hover`, `completion`, `definition`, …) and go green on **every** platform leg,
-not just the ones with Erlang. `documentSymbol`/`formatting` need no
-`line`/`character`; position requests do. Assert on value substrings (`"self"`,
-`Extends:`, a filename) that don't depend on the server's JSON key spacing. One
-scenario per capability (`projects/lsp_*`).
-
-**MCP surface** — drives the bundled `beamtalk-mcp` server over stdio JSON-RPC
-(a hand-rolled, dependency-free client in `src/mcp.rs`; **newline-delimited**,
-unlike LSP's `Content-Length` framing), calls one tool, and asserts a
-**substring** of the result:
-
-```toml
-surface = "mcp"
-tool = "evaluate"          # the MCP tool to call
-code = "1 + 1"             # shortcut → {"code": "1 + 1"} arguments
-# arguments = "{}"         # …or raw JSON arguments for other tools
-response_contains = "2"    # substring asserted in the tool result
-```
-
-`beamtalk-mcp` is launched with `--start`, which boots a live `beamtalk repl`
-**workspace** from the staged project — so `mcp_*` scenarios need a BEAM runtime
-(the CI legs), the project must compile, and the harness prepends the bundle
-`bin/` to `PATH` (since `--start` shells out to `beamtalk`). The `code` key is a
-shortcut for `evaluate`-style tools; other tools take raw `arguments` JSON. One
-scenario per tool/behaviour (`projects/mcp_*`).
+# Legacy Rust harness (removed at switch-over)
 
 ## Requirements
 

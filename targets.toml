@@ -1,0 +1,68 @@
+# Copyright 2026 James Casey
+# SPDX-License-Identifier: Apache-2.0
+#
+# Targets, runners and the per-target OTP assignment (ADR 0154 § 3).
+# OWNER-GATED: exclusions and incubating/blocking status live here, so changes
+# need a code-owner review (ADR § 2). Do not add an exclusion to make CI green.
+#
+# Runners are the images beamtalk's release/edge/nightly workflows build on
+# (pinned in BT-5306). `required` lists the channels in which a missing asset for
+# the target is an error rather than "not built yet" (edge builds macos-arm64
+# only once BT-5307 lands, so it is optional there).
+
+[targets.linux-x86_64]
+runner = "ubuntu-24.04"
+required = ["edge", "nightly", "release"]
+
+[targets.macos-arm64]
+runner = "macos-15"
+required = ["nightly", "release"]
+
+[targets.macos-x86_64]
+runner = "macos-15-intel"
+required = ["nightly", "release"]
+
+[targets.windows-x86_64]
+runner = "windows-2022"
+required = ["nightly", "release"]
+
+# One [[leg]] per (target, OTP role) the gate runs. `otp` is "min" or "max" and is
+# resolved against the dispatch payload's otp window, so a window bump in
+# otp-support.toml needs no edit here. `grep` narrows the leg to tagged tests.
+# `shards` fans the leg out with `playwright --shard=i/n`.
+
+# linux: min-major runs every layer.
+[[leg]]
+target = "linux-x86_64"
+otp = "min"
+channels = ["edge", "nightly", "release"]
+shards = 1
+
+# linux: max-major runs contracts, J1 to J4 and J6 only (tag @max-otp).
+[[leg]]
+target = "linux-x86_64"
+otp = "max"
+channels = ["nightly", "release"]
+grep = "@max-otp"
+shards = 1
+
+# macos-arm64: brew installs the newest erlang -> max-major.
+[[leg]]
+target = "macos-arm64"
+otp = "max"
+channels = ["edge", "nightly", "release"]
+shards = 1
+
+# macos-x86_64: min-major.
+[[leg]]
+target = "macos-x86_64"
+otp = "min"
+channels = ["nightly", "release"]
+shards = 1
+
+# windows: the erlang.org installer offers the newest -> max-major.
+[[leg]]
+target = "windows-x86_64"
+otp = "max"
+channels = ["nightly", "release"]
+shards = 1

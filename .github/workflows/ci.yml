@@ -8,7 +8,10 @@
 # every pull request and push to main, so changes to src/, tests/, the scenario
 # fixtures and the setup scripts can't merge unchecked.
 #
-# Two jobs:
+# (The TypeScript harness jobs below are the future; `check` and `e2e` are the legacy
+# Rust harness, deleted with src/, tests/*.rs and projects/ at switch-over.)
+#
+# Two legacy jobs:
 #   * check — hermetic and fast: fmt, clippy, the lib unit tests, a build, and
 #     shellcheck on the cloud-setup scripts. No network, no Erlang.
 #   * e2e   — installs Erlang/OTP and runs the full #[ignore]d scenario suite
@@ -42,6 +45,86 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ─── The TypeScript harness (ADR 0154) ───────────────────────────────────
+  # Hermetic: typecheck + the harness's tests of itself. No toolchain, no network.
+  # Runs on Linux and Windows because process-tree kill and path handling differ.
+  harness:
+    name: Harness (typecheck, self-tests) · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Harness self-tests
+        run: npx playwright test --project=harness --trace off
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: harness-report-${{ matrix.os }}
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The plumbing smoke against the EDGE bundle through the selector path: the one
+  # place a harness change meets a real toolchain before merge. A skipped edge
+  # (not published yet) is not a failure of this PR.
+  smoke:
+    name: Smoke vs edge (selector path)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Erlang/OTP
+        uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve and install edge
+        id: prep
+        env:
+          BEAMTALK_UAT_VERSION: edge
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run install-toolchain
+      - name: Smoke
+        if: steps.prep.outputs.skipped != 'true'
+        env:
+          CI: 'true'
+        run: npx playwright test --project=smoke --trace off
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: smoke-report
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ─── LEGACY Rust harness: runs until BT-5305 switches uat.yml over ─────────
   check:
     name: Check (fmt, clippy, unit tests)
     runs-on: ubuntu-latest

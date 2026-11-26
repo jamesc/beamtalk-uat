@@ -1,9 +1,14 @@
+# Legacy Rust harness (removed at switch-over)
 /target
-# Cached toolchain installs (downloaded release bundles)
 /.beamtalk-uat
-# Beamtalk build artifacts inside fixture projects
 **/_build/
 **/*.beam
 **/*.core
-# Erlang crash dumps from local BEAM scenario runs
 erl_crash.dump
+
+# TypeScript / Playwright harness
+node_modules/
+/test-results/
+/playwright-report/
+/.uat/
+*.tsbuildinfo

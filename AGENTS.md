@@ -1,5 +1,14 @@
 # AGENTS.md — beamtalk-uat
 
+> **Migration state (BT-5303, ADR 0154 Phase 0).** The new TypeScript harness
+> (Playwright Test + Zod; see `README.md`) now owns `just uat`, `just uat-local`
+> and `just test`, but it only runs a plumbing smoke so far. Everything below that
+> mentions scenarios, `projects/*/expect.toml`, `cargo test` or `BEAMTALK_UAT_BIN`
+> describes the **legacy Rust harness**, which keeps running until BT-5305 switches
+> `uat.yml`. Until then run it with `just legacy-uat [version]`,
+> `just legacy-uat-local <bin>` and `just legacy-test`. A green `just uat` does
+> **not** mean the legacy scenarios passed.
+
 This repo is the **acceptance gate** for Beamtalk: it installs a *released*
 toolchain bundle (the artifact a user gets) and drives real projects through it.
 The full agent guide lives in [`CLAUDE.md`](./CLAUDE.md) — read it first.
