@@ -36,9 +36,9 @@ export interface ReleaseAsset {
 
 /** The (network) side of resolve, injectable so the logic is testable offline. */
 export interface ReleaseSource {
-  /** Tag of the newest non-prerelease release. */
+  /** Tag of the newest non-prerelease release. Throws ReleaseNotFoundError if there is none. */
   latestTag(): Promise<string>;
-  /** Assets currently attached to `tag`. */
+  /** Assets currently attached to `tag`. Throws ReleaseNotFoundError if the release is absent. */
   listAssets(tag: string): Promise<ReleaseAsset[]>;
   /** Download one asset into `dir`; returns its path. Throws AssetNotFoundError on 404. */
   download(tag: string, name: string, dir: string): Promise<string>;
@@ -53,6 +53,17 @@ export class AssetNotFoundError extends Error {
   ) {
     super(`asset ${asset} not found on release ${tag}`);
     this.name = 'AssetNotFoundError';
+  }
+}
+
+/**
+ * The release itself (not just one asset) does not exist. For a rolling selector that
+ * means "not published yet" (skip); for a dispatched run it is a real error.
+ */
+export class ReleaseNotFoundError extends Error {
+  constructor(public readonly tag: string) {
+    super(`release ${tag} not found`);
+    this.name = 'ReleaseNotFoundError';
   }
 }
 
@@ -83,6 +94,17 @@ export class SupersededError extends Error {
   }
 }
 
+/**
+ * A rolling pre-release (`edge`/`nightly`) requested by selector is not published yet.
+ * A precondition, not a regression: the leg skips instead of failing (BT-2497).
+ */
+export class NotPublishedError extends Error {
+  constructor(public readonly tag: string) {
+    super(`rolling release ${tag} is not published yet`);
+    this.name = 'NotPublishedError';
+  }
+}
+
 /** The release tag is final and its bytes are wrong: a real failure, not superseded. */
 export class ReleaseIntegrityError extends Error {
   constructor(message: string) {
@@ -102,6 +124,10 @@ const TOOLCHAIN_RE = /^beamtalk-(\d[^/]*)-(linux-x86_64|macos-arm64|macos-x86_64
 export function toolchainTarget(name: string): TargetName | null {
   const m = TOOLCHAIN_RE.exec(name);
   return m ? TargetName.parse(m[2]) : null;
+}
+
+function rollingChannel(sel: Selector): Channel {
+  return sel.kind === 'edge' ? 'edge' : sel.kind === 'nightly' ? 'nightly' : 'release';
 }
 
 function isRolling(channel: Channel): boolean {
@@ -155,6 +181,20 @@ async function readSidecar(src: ReleaseSource, tag: string, name: string, dir: s
   }
 }
 
+/**
+ * The OTP window at `ref`. A release cut before otp-support.toml existed has none at
+ * its tag: fall back to main's current window rather than being unrunnable.
+ */
+async function otpFor(src: ReleaseSource, ref: string): Promise<OtpWindow> {
+  try {
+    return await src.otpWindow(ref);
+  } catch (e) {
+    if (ref === 'main') throw e;
+    console.warn(`otp-support.toml unreadable at ${ref} (${(e as Error).message}); using main's window`);
+    return src.otpWindow('main');
+  }
+}
+
 async function plan(input: ResolveInput, src: ReleaseSource, scratch: string): Promise<Plan> {
   if (input.kind === 'payload') {
     const p = input.payload;
@@ -202,8 +242,7 @@ async function plan(input: ResolveInput, src: ReleaseSource, scratch: string): P
   }
   if (expected.size === 0) throw new Error(`release ${tag} has no toolchain archives`);
 
-  const otp = await src.otpWindow(channel === 'release' ? tag : 'main');
-  return { source, channel, version, tag, otp, expected };
+  return { source, channel, version, tag, otp: await otpFor(src, channel === 'release' ? tag : 'main'), expected };
 }
 
 /**
@@ -218,7 +257,15 @@ export async function resolve(input: ResolveInput, src: ReleaseSource, outDir: s
   await mkdir(assetsDir, { recursive: true });
   await mkdir(scratch, { recursive: true });
 
-  const pl = await plan(input, src, scratch);
+  let pl: Plan;
+  try {
+    pl = await plan(input, src, scratch);
+  } catch (e) {
+    if (e instanceof ReleaseNotFoundError && input.kind === 'selector' && isRolling(rollingChannel(input.selector))) {
+      throw new NotPublishedError(e.tag);
+    }
+    throw e;
+  }
 
   const mismatches: HashMismatch[] = [];
   const missing: string[] = [];
@@ -247,6 +294,20 @@ export async function resolve(input: ResolveInput, src: ReleaseSource, outDir: s
       continue;
     }
     assets[name] = { sha256, size };
+  }
+
+  if (missing.length && isRolling(pl.channel)) {
+    // "Gone" only means superseded if the release itself is still there with a new
+    // asset set. A release that no longer exists at all is a real error, not a
+    // silently cancelled run that files nothing.
+    try {
+      await src.listAssets(pl.tag);
+    } catch (e) {
+      if (e instanceof ReleaseNotFoundError) {
+        throw new ReleaseIntegrityError(`release ${pl.tag} no longer exists; cannot resolve ${missing.join(', ')}`);
+      }
+      throw e;
+    }
   }
 
   if (mismatches.length || missing.length) {

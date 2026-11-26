@@ -10,12 +10,26 @@
  *   BEAMTALK_UAT_VERSION       latest|edge|nightly|vX.Y.Z|local:<path>   (default: latest)
  *   BEAMTALK_UAT_OTP           OTP major the leg expects; erl on PATH must match
  */
+import { appendFileSync } from 'node:fs';
+import { NotPublishedError } from '../lib/resolve.ts';
 import { assertOtpMajor, detectOtpMajor } from '../lib/otp.ts';
 import { prepareToolchain } from '../lib/toolchain.ts';
 
-const info = await prepareToolchain();
+let info;
+try {
+  info = await prepareToolchain();
+} catch (e) {
+  if (e instanceof NotPublishedError) {
+    // A rolling release that is not published yet is a skip, not a failure (BT-2497).
+    console.log(`::notice title=skipped::${e.message}`);
+    if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'skipped=true\n');
+    process.exit(0);
+  }
+  throw e;
+}
 const major = await detectOtpMajor();
 assertOtpMajor(major, info.otpMajor);
 console.log(`toolchain: ${info.version}  (${info.selector})`);
 console.log(`bin:       ${info.bin}`);
 console.log(`otp:       ${major}`);
+if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'skipped=false\n');

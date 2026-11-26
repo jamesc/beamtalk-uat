@@ -148,18 +148,25 @@ export const test = base.extend<{ uat: Uat }, { toolchain: ToolchainInfo }>({
       }
     }
 
-    // Checked teardown: leftovers are a red step, not silently cleaned up.
-    let leaks: string[] = [];
-    await base.step('teardown: process and epmd leak check', async () => {
-      leaks = await uat.sweep();
-      expect(leaks, `left behind:\n${leaks.join('\n')}`).toEqual([]);
-    });
-    await env.dispose();
+    // Checked teardown: leftovers are a red step, not silently cleaned up. The sandbox
+    // is removed either way (the bundle above has already copied what it needs).
+    try {
+      await base.step('teardown: process and epmd leak check', async () => {
+        const leaks = await uat.sweep();
+        expect(leaks, `left behind:\n${leaks.join('\n')}`).toEqual([]);
+      });
+    } finally {
+      await env.dispose();
+    }
   },
 });
 
+/** One line that re-runs just this test against the same toolchain. */
 export function reproLine(tc: ToolchainInfo, file: string, title: string, project: string): string {
   const rel = file.replace(/\\/g, '/').replace(/^.*\/(tests\/)/, '$1');
-  const sel = tc.selector.startsWith('local:') ? tc.selector : (process.env.BEAMTALK_UAT_VERSION ?? 'latest');
-  return `BEAMTALK_UAT_VERSION=${JSON.stringify(sel)} npx playwright test ${rel} --project=${project} -g ${JSON.stringify(title)}`;
+  const sel = tc.selector; // a release tag (edge, nightly, vX.Y.Z) or local:<bin>
+  return (
+    `BEAMTALK_UAT_VERSION=${JSON.stringify(sel)} npm run install-toolchain && ` +
+    `npx playwright test ${rel} --project=${project} -g ${JSON.stringify(title)}`
+  );
 }

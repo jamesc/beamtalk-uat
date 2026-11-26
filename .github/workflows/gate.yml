@@ -67,6 +67,7 @@ jobs:
       actions: write # `gh run cancel` for a superseded run
     outputs:
       superseded: ${{ steps.resolve.outputs.superseded }}
+      skipped: ${{ steps.resolve.outputs.skipped }}
       matrix: ${{ steps.resolve.outputs.matrix }}
       channel: ${{ steps.resolve.outputs.channel }}
       version: ${{ steps.resolve.outputs.version }}
@@ -93,10 +94,10 @@ jobs:
         run: npx tsx scripts/resolve.ts
 
       - name: Upload the run's artifact
-        if: steps.resolve.outputs.superseded != 'true'
+        if: steps.resolve.outputs.superseded != 'true' && steps.resolve.outputs.skipped != 'true'
         uses: actions/upload-artifact@v5
         with:
-          name: beamtalk-artifact-${{ github.run_id }}
+          name: beamtalk-artifact-${{ github.run_id }}-${{ github.run_attempt }}
           path: resolved
           retention-days: 7
           if-no-files-found: error
@@ -115,7 +116,7 @@ jobs:
   gate:
     name: ${{ matrix.name }}
     needs: resolve
-    if: needs.resolve.outputs.superseded != 'true'
+    if: needs.resolve.outputs.superseded != 'true' && needs.resolve.outputs.skipped != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -139,7 +140,7 @@ jobs:
       - name: Download the run's artifact
         uses: actions/download-artifact@v5
         with:
-          name: beamtalk-artifact-${{ github.run_id }}
+          name: beamtalk-artifact-${{ github.run_id }}-${{ github.run_attempt }}
           path: resolved
 
       # setup-beam installs through the runner tool cache; key that cache by target
@@ -172,7 +173,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: report-${{ matrix.target }}-otp${{ matrix.otp }}-${{ matrix.shard }}
+          name: report-${{ matrix.target }}-otp${{ matrix.otp }}-${{ matrix.shard }}-${{ github.run_attempt }}
           path: |
             playwright-report
             test-results
@@ -199,11 +200,16 @@ jobs:
       - name: Summarise
         env:
           SUPERSEDED: ${{ needs.resolve.outputs.superseded }}
+          SKIPPED: ${{ needs.resolve.outputs.skipped }}
           RESOLVE: ${{ needs.resolve.result }}
           GATE: ${{ needs.gate.result }}
         run: |
           if [ "$SUPERSEDED" = "true" ]; then
             echo "superseded: the release moved on; this run is cancelled and files nothing"
+            exit 0
+          fi
+          if [ "$SKIPPED" = "true" ]; then
+            echo "skipped: the rolling release is not published yet"
             exit 0
           fi
           echo "resolve=$RESOLVE gate=$GATE"

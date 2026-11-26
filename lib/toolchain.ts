@@ -32,10 +32,27 @@ export function binName(target: TargetName = hostTarget()): string {
   return target === 'windows-x86_64' ? 'beamtalk.exe' : 'beamtalk';
 }
 
-async function extract(archive: string, dest: string): Promise<void> {
+/**
+ * Extract a release archive. `.zip` (the Windows bundle) goes through PowerShell on
+ * Windows and `unzip` elsewhere: the `tar` first on PATH there can be Git's GNU tar,
+ * which cannot read zip and mistakes `C:\\...` for a remote `host:path`.
+ */
+export async function extractArchive(archive: string, dest: string): Promise<void> {
   await mkdir(dest, { recursive: true });
-  // bsdtar (macOS, Windows) and GNU tar both read tar.gz; bsdtar also reads zip.
-  await exec('tar', ['-xf', archive, '-C', dest]);
+  if (archive.endsWith('.zip')) {
+    if (process.platform === 'win32') {
+      const q = (p: string) => `'${p.replace(/'/g, "''")}'`;
+      await exec('powershell', [
+        '-NoProfile',
+        '-Command',
+        `Expand-Archive -LiteralPath ${q(archive)} -DestinationPath ${q(dest)} -Force`,
+      ]);
+    } else {
+      await exec('unzip', ['-q', '-o', archive, '-d', dest]);
+    }
+    return;
+  }
+  await exec('tar', ['-xzf', archive, '-C', dest]);
 }
 
 /** Run `<bin> --version` and return the trimmed first line. */
@@ -68,7 +85,7 @@ export async function installFromManifest(
 
   const staging = `${prefix}.staging`;
   await rm(staging, { recursive: true, force: true });
-  await extract(archive, staging);
+  await extractArchive(archive, staging);
   // Archives carry one top-level `beamtalk-<version>/` directory.
   const entries = await readdir(staging, { withFileTypes: true });
   const dirs = entries.filter((e) => e.isDirectory());
@@ -85,7 +102,7 @@ export async function installFromManifest(
     bin,
     version: await queryVersion(bin),
     prefix,
-    selector: `${manifest.channel}:${manifest.tag}`,
+    selector: manifest.tag,
     target,
   };
 }
@@ -140,7 +157,7 @@ export async function prepareToolchain(opts: PrepareOptions = {}): Promise<Toolc
 
 export async function loadToolchain(): Promise<ToolchainInfo> {
   if (!existsSync(toolchainJson())) {
-    throw new Error('no toolchain prepared: run through `playwright test` (globalSetup) or `npm run uat`');
+    throw new Error('no toolchain prepared: run `npm run install-toolchain` (or `npm run uat`) first');
   }
   return ToolchainInfo.parse(JSON.parse(await readFile(toolchainJson(), 'utf8')));
 }

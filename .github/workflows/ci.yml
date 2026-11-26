@@ -102,12 +102,17 @@ jobs:
           version-file: .tool-versions
           version-type: strict
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve, install and run the smoke
+      - name: Resolve and install edge
+        id: prep
         env:
           BEAMTALK_UAT_VERSION: edge
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run install-toolchain
+      - name: Smoke
+        if: steps.prep.outputs.skipped != 'true'
+        env:
           CI: 'true'
-        run: npm run uat -- --trace off
+        run: npx playwright test --project=smoke --trace off
       - name: Upload report on failure
         if: failure()
         uses: actions/upload-artifact@v5

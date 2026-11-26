@@ -14,7 +14,7 @@
  */
 import { appendFileSync } from 'node:fs';
 import { githubSource } from '../lib/github.ts';
-import { SupersededError, buildMatrix, inputFromEvent, resolve } from '../lib/resolve.ts';
+import { NotPublishedError, SupersededError, buildMatrix, inputFromEvent, resolve } from '../lib/resolve.ts';
 
 function output(k: string, v: string): void {
   console.log(`${k}=${v}`);
@@ -33,6 +33,7 @@ async function main(): Promise<void> {
     const manifest = await resolve(input, githubSource, outDir);
     const matrix = buildMatrix(manifest);
     output('superseded', 'false');
+    output('skipped', 'false');
     output('channel', manifest.channel);
     output('version', manifest.version);
     output('tag', manifest.tag);
@@ -41,9 +42,17 @@ async function main(): Promise<void> {
       console.log(`::warning::no independent sha256 for: ${manifest.unverified.join(', ')}`);
     }
   } catch (e) {
+    if (e instanceof NotPublishedError) {
+      console.log(`::notice title=skipped::${e.message}`);
+      output('superseded', 'false');
+      output('skipped', 'true');
+      output('matrix', JSON.stringify({ include: [] }));
+      return;
+    }
     if (e instanceof SupersededError) {
       console.log(`::notice title=superseded::${e.message}`);
       output('superseded', 'true');
+      output('skipped', 'false');
       output('matrix', JSON.stringify({ include: [] }));
       return; // exit 0: the workflow cancels the run; nothing is filed
     }

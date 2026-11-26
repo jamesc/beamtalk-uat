@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { AssetNotFoundError, type ReleaseAsset, type ReleaseSource } from '../../lib/resolve.ts';
+import { AssetNotFoundError, ReleaseNotFoundError, type ReleaseAsset, type ReleaseSource } from '../../lib/resolve.ts';
 
 export const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
 
@@ -21,7 +21,7 @@ export class FakeSource implements ReleaseSource {
   }
   async listAssets(tag: string): Promise<ReleaseAsset[]> {
     const rel = this.releases[tag];
-    if (!rel) throw new Error(`no such release ${tag}`);
+    if (!rel) throw new ReleaseNotFoundError(tag);
     return Object.entries(rel).map(([name, b]) => ({
       name,
       digest: this.digests.has(name) ? this.digests.get(name) : `sha256:${sha(b)}`,
@@ -35,7 +35,10 @@ export class FakeSource implements ReleaseSource {
     await writeFile(p, b);
     return p;
   }
-  async otpWindow() {
+  /** Refs for which otp-support.toml does not exist (a release older than the file). */
+  noOtpAt = new Set<string>();
+  async otpWindow(ref: string) {
+    if (this.noOtpAt.has(ref)) throw new Error(`otp-support.toml: 404 at ${ref}`);
     return this.otp;
   }
 }

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { parse } from 'smol-toml';
 import { OtpWindow } from '../schemas/index.ts';
-import { AssetNotFoundError, type ReleaseAsset, type ReleaseSource } from './resolve.ts';
+import { AssetNotFoundError, ReleaseNotFoundError, type ReleaseAsset, type ReleaseSource } from './resolve.ts';
 
 const exec = promisify(execFile);
 export const RELEASE_REPO = process.env.BEAMTALK_UAT_REPO || 'jamesc/beamtalk';
@@ -28,18 +28,28 @@ async function gh(args: string[]): Promise<string> {
 
 export const githubSource: ReleaseSource = {
   async latestTag() {
-    const out = await gh(['api', `repos/${RELEASE_REPO}/releases/latest`, '--jq', '.tag_name']);
-    return out.trim();
+    try {
+      const out = await gh(['api', `repos/${RELEASE_REPO}/releases/latest`, '--jq', '.tag_name']);
+      return out.trim();
+    } catch (e) {
+      if ((e as { notFound?: boolean }).notFound) throw new ReleaseNotFoundError('latest');
+      throw e;
+    }
   },
 
   async listAssets(tag): Promise<ReleaseAsset[]> {
-    const out = await gh([
-      'api',
-      `repos/${RELEASE_REPO}/releases/tags/${tag}`,
-      '--jq',
-      '[.assets[] | {name, digest}]',
-    ]);
-    return JSON.parse(out) as ReleaseAsset[];
+    try {
+      const out = await gh([
+        'api',
+        `repos/${RELEASE_REPO}/releases/tags/${tag}`,
+        '--jq',
+        '[.assets[] | {name, digest}]',
+      ]);
+      return JSON.parse(out) as ReleaseAsset[];
+    } catch (e) {
+      if ((e as { notFound?: boolean }).notFound) throw new ReleaseNotFoundError(tag);
+      throw e;
+    }
   },
 
   async download(tag, name, dir) {

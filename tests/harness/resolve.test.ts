@@ -9,6 +9,7 @@ import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  NotPublishedError,
   ReleaseIntegrityError,
   SupersededError,
   buildMatrix,
@@ -131,6 +132,37 @@ test.describe('selector path', () => {
     src.digests = new Map([[archiveName('linux-x86_64'), null]]);
     const m = await resolve(inputFromEvent({ eventName: 'workflow_dispatch', selector: 'edge' }), src, await out());
     expect(m.unverified).toEqual([archiveName('linux-x86_64')]);
+  });
+});
+
+test.describe('missing releases', () => {
+  test('a rolling release that is not published yet is a skip, not a failure', async () => {
+    for (const sel of ['edge', 'nightly']) {
+      const err = await resolve(inputFromEvent({ eventName: 'workflow_dispatch', selector: sel }), new FakeSource({}), await out()).catch((e) => e);
+      expect(err, sel).toBeInstanceOf(NotPublishedError);
+    }
+  });
+
+  test('a pinned version that does not exist still fails loudly', async () => {
+    const err = await resolve(inputFromEvent({ eventName: 'workflow_dispatch', selector: 'v9.9.9' }), new FakeSource({}), await out()).catch((e) => e);
+    expect(err).not.toBeInstanceOf(NotPublishedError);
+    expect(err).not.toBeInstanceOf(SupersededError);
+    expect(String(err)).toContain('v9.9.9');
+  });
+
+  test('a dispatched rolling release that no longer exists is an error, not a silently cancelled run', async () => {
+    const assets = bundleSet();
+    const payload = ArtifactPayload.parse(payloadFor('nightly', assets));
+    const err = await resolve({ kind: 'payload', payload }, new FakeSource({}), await out()).catch((e) => e);
+    expect(err).toBeInstanceOf(ReleaseIntegrityError);
+    expect(err).not.toBeInstanceOf(SupersededError);
+  });
+
+  test('a release older than otp-support.toml falls back to main\'s window', async () => {
+    const src = new FakeSource({ 'v0.1.0': bundleSet('0.1.0') }, 'v0.1.0');
+    src.noOtpAt.add('v0.1.0');
+    const m = await resolve(inputFromEvent({ eventName: 'workflow_dispatch', selector: 'v0.1.0' }), src, await out());
+    expect(m.otp).toEqual({ 'min-major': 28, 'max-major': 29 });
   });
 });
 
