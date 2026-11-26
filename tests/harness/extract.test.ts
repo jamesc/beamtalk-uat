@@ -36,5 +36,6 @@ test('a .zip bundle extracts on this OS', async () => {
   const out = join(dir, 'out');
   await extractArchive(zip, out);
   const tree = (await readdir(out, { recursive: true })).join(', ');
-  expect(await readFile(join(out, 'beamtalk-1.0.0', 'bin', 'beamtalk'), 'utf8'), `extracted tree: ${tree}`).toBe('hello bundle');
+  const got = await readFile(join(out, 'beamtalk-1.0.0', 'bin', 'beamtalk'), 'utf8').catch((e: Error) => `${e.message} -- extracted tree: ${tree}`);
+  expect(got).toBe('hello bundle');
 });
