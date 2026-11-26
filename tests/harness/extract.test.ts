@@ -7,7 +7,7 @@
 
 import { expect, test } from '@playwright/test';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -35,5 +35,6 @@ test('a .zip bundle extracts on this OS', async () => {
   }
   const out = join(dir, 'out');
   await extractArchive(zip, out);
-  expect(await readFile(join(out, 'beamtalk-1.0.0', 'bin', 'beamtalk'), 'utf8')).toBe('hello bundle');
+  const tree = (await readdir(out, { recursive: true })).join(', ');
+  expect(await readFile(join(out, 'beamtalk-1.0.0', 'bin', 'beamtalk'), 'utf8'), `extracted tree: ${tree}`).toBe('hello bundle');
 });
