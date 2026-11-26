@@ -1,0 +1,210 @@
+# Copyright 2026 James Casey
+# SPDX-License-Identifier: Apache-2.0
+#
+# The acceptance gate (ADR 0154, BT-5303)
+# =======================================
+# Tests the PUBLISHED artifacts of jamesc/beamtalk, never source.
+#
+#   resolve  downloads every asset ONCE, verifies each sha256 and uploads one
+#            workflow artifact. A hash that no longer matches means the rolling
+#            release (edge/nightly) was replaced mid-flight: the run ends
+#            `superseded` -- cancelled, nothing filed.
+#   gate     one job per (target x OTP major x shard) leg from targets.toml. Every
+#            leg installs the bundle from the resolve artifact; none touches the
+#            release again.
+#   result   one required-check-shaped summary of the legs.
+#
+# Triggers
+#   repository_dispatch `beamtalk-artifact`  the ADR § 3 payload (edge/nightly/release)
+#   repository_dispatch `beamtalk-release`   the legacy {version, tag} payload; verified
+#                                            against the published .sha256 files. Accepted
+#                                            until the release after Phase 0 ships.
+#   workflow_dispatch                        a version selector: latest|edge|nightly|vX.Y.Z
+#
+# Phase 0 note: the legacy Rust harness still runs from uat.yml (and posts the
+# `uat-gate` status) until BT-5305's J1/J2 + contracts are green on all four targets
+# against `latest`; that same PR deletes the Rust harness and switches uat.yml.
+# This workflow deliberately has no schedule and posts no status for now.
+
+name: Gate
+
+on:
+  repository_dispatch:
+    types: [beamtalk-artifact, beamtalk-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Selector: latest, edge, nightly or vX.Y.Z'
+        required: false
+        default: 'latest'
+
+# One group per rolling channel, cancelling the older run: a newer edge/nightly
+# supersedes it. Release runs get a group of their own and are NEVER cancelled
+# (a pending run in a shared group would be replaced, so the group is per-run).
+concurrency:
+  group: >-
+    gate-${{
+      (github.event.client_payload.channel == 'edge' || (github.event_name == 'workflow_dispatch' && inputs.version == 'edge')) && 'edge' ||
+      (github.event.client_payload.channel == 'nightly' || (github.event_name == 'workflow_dispatch' && inputs.version == 'nightly')) && 'nightly' ||
+      format('release-{0}', github.run_id)
+    }}
+  cancel-in-progress: >-
+    ${{
+      github.event.client_payload.channel == 'edge' || github.event.client_payload.channel == 'nightly' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.version == 'edge' || inputs.version == 'nightly'))
+    }}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve and download once
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write # `gh run cancel` for a superseded run
+    outputs:
+      superseded: ${{ steps.resolve.outputs.superseded }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Resolve (download once, verify sha256)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          SELECTOR: ${{ inputs.version }}
+          OUT_DIR: resolved
+        run: npx tsx scripts/resolve.ts
+
+      - name: Upload the run's artifact
+        if: steps.resolve.outputs.superseded != 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: beamtalk-artifact-${{ github.run_id }}
+          path: resolved
+          retention-days: 7
+          if-no-files-found: error
+
+      # The release moved on while we were resolving. That is not a failure of the
+      # toolchain: end the run as cancelled and file nothing (ADR § 11, `superseded`).
+      - name: End the run as superseded
+        if: steps.resolve.outputs.superseded == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::notice title=superseded::the release was replaced while resolving; cancelling this run"
+          gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"
+          sleep 120 # stay "in progress" until the cancellation lands, so the run can't finish green
+
+  gate:
+    name: ${{ matrix.name }}
+    needs: resolve
+    if: needs.resolve.outputs.superseded != 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false # one target's red must not hide the others
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      BEAMTALK_UAT_ARTIFACT_DIR: ${{ github.workspace }}/resolved
+      BEAMTALK_UAT_OTP: ${{ matrix.otp }}
+      BEAMTALK_UAT_LEG: ${{ matrix.target }}-otp${{ matrix.otp }}-${{ matrix.shard }}
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Download the run's artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: beamtalk-artifact-${{ github.run_id }}
+          path: resolved
+
+      # setup-beam installs through the runner tool cache; key that cache by target
+      # and OTP major so a leg restores its major instead of re-downloading it.
+      - name: Cache OTP (per target and major)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/otp*
+          key: otp-${{ matrix.target }}-${{ matrix.otp }}
+
+      - name: Install Erlang/OTP ${{ matrix.otp }}
+        uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          version-type: loose
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install the toolchain from the artifact
+        shell: bash
+        run: npm run install-toolchain
+
+      - name: Run the gate
+        shell: bash
+        run: |
+          args=(--project=smoke --trace off --shard="${{ matrix.shard }}/${{ matrix.shards }}")
+          if [ -n "${{ matrix.grep }}" ]; then args+=(--grep "${{ matrix.grep }}"); fi
+          npx playwright test "${args[@]}"
+
+      - name: Upload report and failure bundles
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: report-${{ matrix.target }}-otp${{ matrix.otp }}-${{ matrix.shard }}
+          path: |
+            playwright-report
+            test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## ${{ matrix.name }}"
+            echo "- channel: \`${{ needs.resolve.outputs.channel }}\`, version: \`${{ needs.resolve.outputs.version }}\`, tag: \`${{ needs.resolve.outputs.tag }}\`"
+            echo "- OTP major: ${{ matrix.otp }} (${{ matrix.otp_role }}-major leg)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  result:
+    name: Gate result
+    needs: [resolve, gate]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Summarise
+        env:
+          SUPERSEDED: ${{ needs.resolve.outputs.superseded }}
+          RESOLVE: ${{ needs.resolve.result }}
+          GATE: ${{ needs.gate.result }}
+        run: |
+          if [ "$SUPERSEDED" = "true" ]; then
+            echo "superseded: the release moved on; this run is cancelled and files nothing"
+            exit 0
+          fi
+          echo "resolve=$RESOLVE gate=$GATE"
+          [ "$RESOLVE" = "success" ] && [ "$GATE" = "success" ]
