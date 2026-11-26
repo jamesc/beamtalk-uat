@@ -33,7 +33,7 @@ export function binName(target: TargetName = hostTarget()): string {
 }
 
 /**
- * Extract a release archive. `.zip` (the Windows bundle) goes through PowerShell on
+ * Extract a release archive. `.zip` (the Windows bundle) goes through System32's bsdtar on
  * Windows and `unzip` elsewhere: the `tar` first on PATH there can be Git's GNU tar,
  * which cannot read zip and mistakes `C:\\...` for a remote `host:path`.
  */
@@ -41,12 +41,9 @@ export async function extractArchive(archive: string, dest: string): Promise<voi
   await mkdir(dest, { recursive: true });
   if (archive.endsWith('.zip')) {
     if (process.platform === 'win32') {
-      const q = (p: string) => `'${p.replace(/'/g, "''")}'`;
-      await exec('powershell', [
-        '-NoProfile',
-        '-Command',
-        `Expand-Archive -LiteralPath ${q(archive)} -DestinationPath ${q(dest)} -Force`,
-      ]);
+      // Windows' own bsdtar reads zip; Git's GNU tar (first on PATH in bash steps) cannot.
+      const bsdtar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
+      await exec(bsdtar, ['-xf', archive, '-C', dest]);
     } else {
       await exec('unzip', ['-q', '-o', archive, '-d', dest]);
     }
