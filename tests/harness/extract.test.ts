@@ -27,7 +27,9 @@ test('a .zip bundle extracts on this OS', async () => {
   const dir = await sample();
   const zip = join(dir, 'bundle.zip');
   if (process.platform === 'win32') {
-    await exec('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path '${join(dir, 'src', 'beamtalk-1.0.0')}' -DestinationPath '${zip}'`]);
+    // 7z is how beamtalk's package-release.sh builds the Windows bundle (Compress-Archive
+    // on Windows PowerShell writes backslash entry names, which is not what we ship).
+    await exec('7z', ['a', zip, 'beamtalk-1.0.0'], { cwd: join(dir, 'src') });
   } else {
     await exec('zip', ['-qr', zip, 'beamtalk-1.0.0'], { cwd: join(dir, 'src') });
   }
